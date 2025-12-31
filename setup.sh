@@ -1,0 +1,1603 @@
+#!/bin/bash
+
+# Next.js Automated Setup Script with SSL, Nginx, Database, and Analytics
+# Run as root or with sudo
+
+set -e
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
+log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+log_error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
+log_step() { echo -e "${BLUE}[STEP]${NC} $1"; }
+
+# Check if running as root
+if [[ $EUID -ne 0 ]]; then
+   log_error "This script must be run as root or with sudo"
+fi
+
+# Generate random password
+generate_password() {
+    openssl rand -base64 32 | tr -d "=+/" | cut -c1-24
+}
+
+# Validate and sanitize project name
+sanitize_project_name() {
+    local name=$1
+    # Convert to lowercase
+    name=$(echo "$name" | tr '[:upper:]' '[:lower:]')
+    # Replace spaces and underscores with hyphens
+    name=$(echo "$name" | tr '_' '-' | tr ' ' '-')
+    # Remove any characters that aren't alphanumeric or hyphens
+    name=$(echo "$name" | sed 's/[^a-z0-9-]//g')
+    # Remove leading/trailing hyphens
+    name=$(echo "$name" | sed 's/^-*//;s/-*$//')
+    # Ensure it doesn't start with a number
+    if [[ $name =~ ^[0-9] ]]; then
+        name="app-$name"
+    fi
+    echo "$name"
+}
+
+# Validate domain
+validate_domain() {
+    local domain=$1
+    if [[ ! $domain =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$ ]]; then
+        return 1
+    fi
+    return 0
+}
+
+# Validate email
+validate_email() {
+    local email=$1
+    if [[ ! $email =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
+        return 1
+    fi
+    return 0
+}
+
+# Check if port is in use
+check_port() {
+    local port=$1
+    if lsof -Pi :$port -sTCP:LISTEN -t >/dev/null 2>&1 ; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Get domain from user with validation
+log_step "Domain Configuration"
+while true; do
+    read -p "Enter your domain name (e.g., example.com): " DOMAIN
+    if [[ -z "$DOMAIN" ]]; then
+        log_warn "Domain cannot be empty. Please try again."
+        continue
+    fi
+    if validate_domain "$DOMAIN"; then
+        break
+    else
+        log_warn "Invalid domain format. Please try again."
+    fi
+done
+
+# Get email for Let's Encrypt with validation
+while true; do
+    read -p "Enter your email for SSL certificate notifications: " EMAIL
+    if [[ -z "$EMAIL" ]]; then
+        log_warn "Email cannot be empty. Please try again."
+        continue
+    fi
+    if validate_email "$EMAIL"; then
+        break
+    else
+        log_warn "Invalid email format. Please try again."
+    fi
+done
+
+# Get project name with validation
+while true; do
+    read -p "Enter project name (default: nextjs-app): " PROJECT_NAME_INPUT
+    PROJECT_NAME_INPUT=${PROJECT_NAME_INPUT:-nextjs-app}
+    PROJECT_NAME=$(sanitize_project_name "$PROJECT_NAME_INPUT")
+    
+    if [[ -z "$PROJECT_NAME" ]]; then
+        log_warn "Invalid project name. Please use letters, numbers, and hyphens."
+        continue
+    fi
+    
+    if [[ ${#PROJECT_NAME} -lt 3 ]]; then
+        log_warn "Project name must be at least 3 characters long."
+        continue
+    fi
+    
+    log_info "Project name will be: $PROJECT_NAME"
+    break
+done
+
+# Database selection
+log_step "Database Configuration"
+echo "Select database:"
+echo "1) SQLite (lightweight, file-based)"
+echo "2) MariaDB (full-featured SQL server)"
+while true; do
+    read -p "Enter choice [1-2]: " DB_CHOICE
+    case $DB_CHOICE in
+        1|2)
+            break
+            ;;
+        *)
+            log_warn "Invalid choice. Please enter 1 or 2."
+            ;;
+    esac
+done
+
+DB_TYPE=""
+DB_NAME="${PROJECT_NAME//-/_}_db"
+DB_USER="${PROJECT_NAME//-/_}_user"
+DB_PASSWORD=$(generate_password)
+DB_HOST="localhost"
+DB_PORT="3306"
+
+case $DB_CHOICE in
+    1)
+        DB_TYPE="sqlite"
+        log_info "SQLite selected"
+        ;;
+    2)
+        DB_TYPE="mariadb"
+        log_info "MariaDB selected"
+        ;;
+esac
+
+# Admin user configuration
+log_step "Admin User Configuration"
+while true; do
+    read -p "Enter admin username (default: admin): " ADMIN_USER
+    ADMIN_USER=${ADMIN_USER:-admin}
+    # Sanitize username
+    ADMIN_USER=$(echo "$ADMIN_USER" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_-]//g')
+    
+    if [[ -z "$ADMIN_USER" ]]; then
+        log_warn "Username cannot be empty after sanitization."
+        continue
+    fi
+    
+    if [[ ${#ADMIN_USER} -lt 3 ]]; then
+        log_warn "Username must be at least 3 characters long."
+        continue
+    fi
+    
+    break
+done
+
+read -p "Enter admin password (leave empty to auto-generate): " ADMIN_PASSWORD
+if [[ -z "$ADMIN_PASSWORD" ]]; then
+    ADMIN_PASSWORD=$(generate_password)
+    AUTO_GENERATED_PASS=true
+else
+    AUTO_GENERATED_PASS=false
+    if [[ ${#ADMIN_PASSWORD} -lt 8 ]]; then
+        log_warn "Password is less than 8 characters. Consider using a stronger password."
+    fi
+fi
+
+PROJECT_DIR="/var/www/$PROJECT_NAME"
+NGINX_AVAILABLE="/etc/nginx/sites-available/$DOMAIN"
+NGINX_ENABLED="/etc/nginx/sites-enabled/$DOMAIN"
+
+# Check if project directory already exists
+if [[ -d "$PROJECT_DIR" ]]; then
+    log_warn "Project directory $PROJECT_DIR already exists."
+    read -p "Do you want to remove it and continue? (yes/no): " CONFIRM
+    if [[ "$CONFIRM" != "yes" ]]; then
+        log_error "Setup cancelled by user."
+    fi
+    log_info "Removing existing directory..."
+    rm -rf "$PROJECT_DIR"
+fi
+
+# Check if nginx site already exists
+if [[ -f "$NGINX_AVAILABLE" ]]; then
+    log_warn "Nginx configuration for $DOMAIN already exists."
+    read -p "Do you want to overwrite it? (yes/no): " CONFIRM
+    if [[ "$CONFIRM" != "yes" ]]; then
+        log_error "Setup cancelled by user."
+    fi
+    rm -f "$NGINX_AVAILABLE" "$NGINX_ENABLED"
+fi
+
+# Check if service already exists
+if systemctl list-unit-files | grep -q "^$PROJECT_NAME.service"; then
+    log_warn "Service $PROJECT_NAME already exists."
+    systemctl stop "$PROJECT_NAME" 2>/dev/null || true
+    systemctl disable "$PROJECT_NAME" 2>/dev/null || true
+    rm -f "/etc/systemd/system/$PROJECT_NAME.service"
+fi
+
+log_info "Starting setup for $DOMAIN..."
+
+# Update system
+log_info "Updating system packages..."
+apt-get update
+apt-get upgrade -y
+
+# Install Node.js and npm if not installed
+if ! command -v node &> /dev/null; then
+    log_info "Installing Node.js and npm..."
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+    apt-get install -y nodejs
+else
+    log_info "Node.js already installed ($(node -v))"
+fi
+
+# Install lsof if missing (required for robust port detection)
+if ! command -v lsof &> /dev/null; then
+    log_info "Installing lsof for port detection..."
+    apt-get install -y lsof
+fi
+
+# Install nginx if not installed
+if ! command -v nginx &> /dev/null; then
+    log_info "Installing Nginx..."
+    apt-get install -y nginx
+else
+    log_info "Nginx already installed"
+fi
+
+# Install certbot if not installed
+if ! command -v certbot &> /dev/null; then
+    log_info "Installing Certbot..."
+    apt-get install -y certbot python3-certbot-nginx
+else
+    log_info "Certbot already installed"
+fi
+
+# Install database
+if [[ "$DB_TYPE" == "mariadb" ]]; then
+    if ! command -v mysql &> /dev/null; then
+        log_info "Installing MariaDB..."
+        apt-get install -y mariadb-server
+        systemctl start mariadb
+        systemctl enable mariadb
+    else
+        log_info "MariaDB already installed"
+    fi
+    
+    # Check if database exists
+    if mysql -e "USE $DB_NAME;" 2>/dev/null; then
+        log_warn "Database $DB_NAME already exists. Dropping and recreating..."
+        mysql -e "DROP DATABASE $DB_NAME;"
+    fi
+    
+    # Secure MariaDB and create database
+    log_info "Creating MariaDB database and user..."
+    mysql -e "CREATE DATABASE $DB_NAME CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+    mysql -e "DROP USER IF EXISTS '$DB_USER'@'localhost';"
+    mysql -e "CREATE USER '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASSWORD';"
+    mysql -e "GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost';"
+    mysql -e "FLUSH PRIVILEGES;"
+    
+    DB_URL="mysql://$DB_USER:$DB_PASSWORD@$DB_HOST:$DB_PORT/$DB_NAME"
+else
+    log_info "SQLite will be used (no installation needed)"
+    DB_URL="file:./analytics.db"
+fi
+
+# Find a random free port between 3000 and 9000
+find_free_port() {
+    local port
+    while true; do
+        # Generate random port between 3000 and 9000
+        # RANDOM gives 0-32767. Modulo 6001 gives 0-6000. + 3000 gives 3000-9000.
+        port=$(( 3000 + RANDOM % 6001 ))
+        
+        # Check if port is in use using lsof
+        # If output is empty (! ...), the port is free
+        if ! lsof -Pi :$port -sTCP:LISTEN -t >/dev/null 2>&1; then
+            echo $port
+            break
+        fi
+    done
+}
+
+log_info "Scanning for a random available port..."
+APP_PORT=$(find_free_port)
+log_info "Selected available port: $APP_PORT"
+
+# Create project directory
+log_info "Creating project directory at $PROJECT_DIR..."
+mkdir -p $PROJECT_DIR
+cd $PROJECT_DIR
+
+# Create Next.js app
+log_info "Creating Next.js application..."
+export NEXT_TELEMETRY_DISABLED=1
+npx --yes create-next-app@latest . --typescript --tailwind --app --no-src-dir --import-alias "@/*" --use-npm --yes
+
+
+# Install additional dependencies
+log_info "Installing additional dependencies..."
+# FIX: Pin Prisma to v5 to avoid v7 breaking changes with prisma.config.ts
+npm install @prisma/client@5 bcryptjs jsonwebtoken
+npm install -D prisma@5 @types/bcryptjs @types/jsonwebtoken
+
+# Initialize Prisma
+log_info "Setting up Prisma ORM..."
+npx prisma init --datasource-provider $([[ "$DB_TYPE" == "sqlite" ]] && echo "sqlite" || echo "mysql")
+
+# FIX: Remove prisma.config.ts to prevent conflict with schema.prisma in Prisma 7+
+# This forces Prisma to read the configuration from schema.prisma as intended
+if [[ -f prisma.config.ts ]]; then
+    rm prisma.config.ts
+    log_info "Removed prisma.config.ts to maintain compatibility"
+fi
+
+# Create Prisma schema
+log_info "Creating database schema..."
+cat > prisma/schema.prisma << EOF
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "$([[ "$DB_TYPE" == "sqlite" ]] && echo "sqlite" || echo "mysql")"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(cuid())
+  username  String   @unique
+  password  String
+  role      String   @default("admin")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Analytics {
+  id            String   @id @default(cuid())
+  timestamp     DateTime @default(now())
+  ip            String
+  userAgent     String?  $([[ "$DB_TYPE" == "mariadb" ]] && echo "@db.Text" || echo "")
+  method        String
+  path          String
+  statusCode    Int
+  responseTime  Int
+  referer       String?  $([[ "$DB_TYPE" == "mariadb" ]] && echo "@db.Text" || echo "")
+  country       String?
+  city          String?
+  device        String?
+  browser       String?
+  os            String?
+  bytesIn       Int      @default(0)
+  bytesOut      Int      @default(0)
+  
+  @@index([timestamp])
+  @@index([ip])
+  @@index([path])
+}
+
+model ApiStats {
+  id           String   @id @default(cuid())
+  timestamp    DateTime @default(now())
+  endpoint     String
+  method       String
+  statusCode   Int
+  responseTime Int
+  
+  @@index([timestamp])
+  @@index([endpoint])
+}
+EOF
+
+# Create .env file
+log_info "Creating environment configuration..."
+cat > .env << EOF
+DATABASE_URL="$DB_URL"
+JWT_SECRET="$(generate_password)"
+ADMIN_USERNAME="$ADMIN_USER"
+ADMIN_PASSWORD="$ADMIN_PASSWORD"
+NEXT_PUBLIC_SITE_URL="https://$DOMAIN"
+NODE_ENV=production
+EOF
+
+# Create lib directory structure
+mkdir -p lib
+
+# Create database utility
+cat > lib/db.ts << 'EOF'
+import { PrismaClient } from '@prisma/client'
+
+const globalForPrisma = globalThis as unknown as {
+  prisma: PrismaClient | undefined
+}
+
+export const prisma = globalForPrisma.prisma ?? new PrismaClient({
+  log: process.env.NODE_ENV === 'development' ? ['query', 'error', 'warn'] : ['error'],
+})
+
+if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = prisma
+EOF
+
+# Create auth utility
+cat > lib/auth.ts << 'EOF'
+import bcrypt from 'bcryptjs'
+import jwt from 'jsonwebtoken'
+
+const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-this'
+
+export async function hashPassword(password: string): Promise<string> {
+  return bcrypt.hash(password, 12)
+}
+
+export async function verifyPassword(password: string, hash: string): Promise<boolean> {
+  return bcrypt.compare(password, hash)
+}
+
+export function generateToken(userId: string, username: string): string {
+  return jwt.sign({ userId, username }, JWT_SECRET, { expiresIn: '7d' })
+}
+
+export function verifyToken(token: string): { userId: string; username: string } | null {
+  try {
+    return jwt.verify(token, JWT_SECRET) as { userId: string; username: string }
+  } catch {
+    return null
+  }
+}
+EOF
+
+# Create analytics utility
+cat > lib/analytics.ts << 'EOF'
+import { prisma } from './db'
+
+interface AnalyticsData {
+  ip: string
+  userAgent?: string
+  method: string
+  path: string
+  statusCode: number
+  responseTime: number
+  referer?: string
+  bytesIn?: number
+  bytesOut?: number
+}
+
+export async function logAnalytics(data: AnalyticsData) {
+  try {
+    const userAgent = data.userAgent || ''
+    
+    // Parse user agent for device, browser, OS info
+    const device = getDevice(userAgent)
+    const browser = getBrowser(userAgent)
+    const os = getOS(userAgent)
+    
+    await prisma.analytics.create({
+      data: {
+        ip: data.ip,
+        userAgent: data.userAgent,
+        method: data.method,
+        path: data.path,
+        statusCode: data.statusCode,
+        responseTime: data.responseTime,
+        referer: data.referer,
+        device,
+        browser,
+        os,
+        bytesIn: data.bytesIn || 0,
+        bytesOut: data.bytesOut || 0,
+      },
+    })
+  } catch (error) {
+    console.error('Analytics logging error:', error)
+  }
+}
+
+function getDevice(ua: string): string {
+  if (/mobile/i.test(ua)) return 'Mobile'
+  if (/tablet|ipad/i.test(ua)) return 'Tablet'
+  return 'Desktop'
+}
+
+function getBrowser(ua: string): string {
+  if (/chrome/i.test(ua) && !/edge|edg/i.test(ua)) return 'Chrome'
+  if (/firefox/i.test(ua)) return 'Firefox'
+  if (/safari/i.test(ua) && !/chrome/i.test(ua)) return 'Safari'
+  if (/edge|edg/i.test(ua)) return 'Edge'
+  return 'Other'
+}
+
+function getOS(ua: string): string {
+  if (/windows/i.test(ua)) return 'Windows'
+  if (/mac os/i.test(ua)) return 'macOS'
+  if (/linux/i.test(ua)) return 'Linux'
+  if (/android/i.test(ua)) return 'Android'
+  if (/ios|iphone|ipad/i.test(ua)) return 'iOS'
+  return 'Other'
+}
+
+export async function getAnalyticsSummary(days: number = 7) {
+  const startDate = new Date()
+  startDate.setDate(startDate.getDate() - days)
+  
+  try {
+    const [totalVisits, uniqueVisitors, topPages, deviceStats, browserStats] = await Promise.all([
+      prisma.analytics.count({
+        where: { timestamp: { gte: startDate } },
+      }),
+      prisma.analytics.groupBy({
+        by: ['ip'],
+        where: { timestamp: { gte: startDate } },
+      }),
+      prisma.analytics.groupBy({
+        by: ['path'],
+        where: { timestamp: { gte: startDate } },
+        _count: { path: true },
+        orderBy: { _count: { path: 'desc' } },
+        take: 10,
+      }),
+      prisma.analytics.groupBy({
+        by: ['device'],
+        where: { timestamp: { gte: startDate } },
+        _count: { device: true },
+      }),
+      prisma.analytics.groupBy({
+        by: ['browser'],
+        where: { timestamp: { gte: startDate } },
+        _count: { browser: true },
+      }),
+    ])
+    
+    return {
+      totalVisits,
+      uniqueVisitors: uniqueVisitors.length,
+      topPages: topPages.map(p => ({ path: p.path, visits: p._count.path })),
+      deviceStats: deviceStats.map(d => ({ device: d.device, count: d._count.device })),
+      browserStats: browserStats.map(b => ({ browser: b.browser, count: b._count.browser })),
+    }
+  } catch (error) {
+    console.error('Error fetching analytics summary:', error)
+    return {
+      totalVisits: 0,
+      uniqueVisitors: 0,
+      topPages: [],
+      deviceStats: [],
+      browserStats: [],
+    }
+  }
+}
+EOF
+
+# Create middleware for analytics
+cat > middleware.ts << 'EOF'
+import { NextResponse } from 'next/server'
+import type { NextRequest } from 'next/server'
+
+export async function middleware(request: NextRequest) {
+  const response = NextResponse.next()
+  const startTime = Date.now()
+  
+  // 1. Robust IP Extraction
+  let ip = '127.0.0.1'
+  try {
+    const forwardedFor = request.headers.get('x-forwarded-for')
+    const realIp = request.headers.get('x-real-ip')
+    
+    if (forwardedFor) {
+      ip = forwardedFor.split(',')[0].trim()
+    } else if (realIp) {
+      ip = realIp
+    }
+    
+    // Clean IPv6 prefix
+    if (ip.startsWith('::ffff:')) ip = ip.substring(7)
+  } catch (e) {
+    console.error('Middleware IP extraction error:', e)
+  }
+
+  // 2. Fire-and-forget Analytics Logging
+  // We use 127.0.0.1 to avoid DNS/SSL loopback issues. 
+  // We assume port is in process.env.PORT or default to 3000.
+  const port = process.env.PORT || 3000
+  const logUrl = `http://127.0.0.1:${port}/api/internal/analytics`
+
+  const analyticsData = {
+    ip,
+    userAgent: request.headers.get('user-agent'),
+    method: request.method,
+    path: request.nextUrl.pathname,
+    statusCode: response.status,
+    responseTime: 0, // Placeholder, calculated roughly below
+    referer: request.headers.get('referer'),
+  }
+
+  // Execute the fetch without awaiting it (non-blocking)
+  fetch(logUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      ...analyticsData,
+      responseTime: Date.now() - startTime
+    }),
+  }).catch(err => {
+    // This log will show up in: journalctl -u your-service-name
+    console.error(`[Analytics Fail] Could not log to ${logUrl}:`, err.message)
+  })
+  
+  return response
+}
+
+export const config = {
+  matcher: [
+    /*
+     * Match all request paths except for the ones starting with:
+     * - api (API routes)
+     * - _next/static (static files)
+     * - _next/image (image optimization files)
+     * - admin (admin dashboard)
+     * - Any path containing a dot "." (excludes files like .png, .json, .xml, .txt)
+     */
+    '/((?!api|_next/static|_next/image|admin|.*\\..*).*)',
+  ],
+}
+EOF
+
+
+# Create API routes directory structure
+log_info "Creating API directory structure..."
+mkdir -p app/api/auth/login
+mkdir -p app/api/analytics/summary
+mkdir -p app/api/analytics/detailed
+mkdir -p app/api/analytics/traffic
+mkdir -p app/api/internal/analytics
+mkdir -p app/api/example
+
+# Auth login API
+cat > app/api/auth/login/route.ts << 'EOF'
+import { NextRequest, NextResponse } from 'next/server'
+import { prisma } from '@/lib/db'
+import { verifyPassword, generateToken } from '@/lib/auth'
+
+export async function POST(request: NextRequest) {
+  try {
+    const { username, password } = await request.json()
+    
+    if (!username || !password) {
+      return NextResponse.json({ error: 'Username and password required' }, { status: 400 })
+    }
+    
+    const user = await prisma.user.findUnique({
+      where: { username },
+    })
+    
+    if (!user) {
+      return NextResponse.json({ error: 'Invalid credentials' }, { status: 401 })
+    }
+    
+    const valid = await verifyPassword(password, user.password)
+    
+    if (!valid) {
+      return NextResponse.json({ error: 'Invalid credentials' }, { status: 401 })
+    }
+    
+    const token = generateToken(user.id, user.username)
+    
+    return NextResponse.json({ token, username: user.username })
+  } catch (error) {
+    console.error('Login error:', error)
+    return NextResponse.json({ error: 'Login failed' }, { status: 500 })
+  }
+}
+EOF
+
+# Analytics API
+cat > app/api/analytics/summary/route.ts << 'EOF'
+import { NextRequest, NextResponse } from 'next/server'
+import { verifyToken } from '@/lib/auth'
+import { getAnalyticsSummary } from '@/lib/analytics'
+
+// Force this route to always run dynamically (no caching)
+export const dynamic = 'force-dynamic'
+
+export async function GET(request: NextRequest) {
+  try {
+    const token = request.headers.get('authorization')?.replace('Bearer ', '')
+    
+    if (!token || !verifyToken(token)) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    }
+    
+    const { searchParams } = new URL(request.url)
+    const days = parseInt(searchParams.get('days') || '7')
+    
+    const summary = await getAnalyticsSummary(days)
+    
+    return NextResponse.json(summary)
+  } catch (error) {
+    console.error('Analytics summary error:', error)
+    return NextResponse.json({ error: 'Failed to fetch analytics' }, { status: 500 })
+  }
+}
+EOF
+
+# Detailed analytics API
+cat > app/api/analytics/detailed/route.ts << 'EOF'
+import { NextRequest, NextResponse } from 'next/server'
+import { verifyToken } from '@/lib/auth'
+import { prisma } from '@/lib/db'
+
+export async function GET(request: NextRequest) {
+  try {
+    const token = request.headers.get('authorization')?.replace('Bearer ', '')
+    
+    if (!token || !verifyToken(token)) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    }
+    
+    const { searchParams } = new URL(request.url)
+    const days = parseInt(searchParams.get('days') || '7')
+    const page = parseInt(searchParams.get('page') || '1')
+    const limit = parseInt(searchParams.get('limit') || '50')
+    
+    const startDate = new Date()
+    startDate.setDate(startDate.getDate() - days)
+    
+    const [visits, total] = await Promise.all([
+      prisma.analytics.findMany({
+        where: { timestamp: { gte: startDate } },
+        orderBy: { timestamp: 'desc' },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      prisma.analytics.count({
+        where: { timestamp: { gte: startDate } },
+      }),
+    ])
+    
+    return NextResponse.json({
+      visits,
+      total,
+      page,
+      pages: Math.ceil(total / limit),
+    })
+  } catch (error) {
+    console.error('Detailed analytics error:', error)
+    return NextResponse.json({ error: 'Failed to fetch detailed analytics' }, { status: 500 })
+  }
+}
+EOF
+
+# Traffic stats API
+cat > app/api/analytics/traffic/route.ts << 'EOF'
+import { NextRequest, NextResponse } from 'next/server'
+import { verifyToken } from '@/lib/auth'
+import { prisma } from '@/lib/db'
+
+export async function GET(request: NextRequest) {
+  try {
+    const token = request.headers.get('authorization')?.replace('Bearer ', '')
+    
+    if (!token || !verifyToken(token)) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    }
+    
+    const { searchParams } = new URL(request.url)
+    const days = parseInt(searchParams.get('days') || '7')
+    
+    const startDate = new Date()
+    startDate.setDate(startDate.getDate() - days)
+    
+    // Get all traffic data
+    const traffic = await prisma.analytics.findMany({
+      where: { timestamp: { gte: startDate } },
+      select: {
+        timestamp: true,
+        bytesIn: true,
+        bytesOut: true,
+      },
+      orderBy: { timestamp: 'asc' },
+    })
+    
+    return NextResponse.json({ traffic })
+  } catch (error) {
+    console.error('Traffic stats error:', error)
+    return NextResponse.json({ error: 'Failed to fetch traffic stats' }, { status: 500 })
+  }
+}
+EOF
+
+# Internal analytics logging endpoint
+cat > app/api/internal/analytics/route.ts << 'EOF'
+import { NextRequest, NextResponse } from 'next/server'
+import { logAnalytics } from '@/lib/analytics'
+
+export async function POST(request: NextRequest) {
+  try {
+    const data = await request.json()
+    await logAnalytics(data)
+    return NextResponse.json({ success: true })
+  } catch (error) {
+    console.error('Internal analytics logging error:', error)
+    return NextResponse.json({ error: 'Failed to log analytics' }, { status: 500 })
+  }
+}
+EOF
+
+# Example API endpoint
+cat > app/api/example/route.ts << 'EOF'
+import { NextRequest, NextResponse } from 'next/server'
+
+export async function GET(request: NextRequest) {
+  return NextResponse.json({
+    message: 'Hello from API!',
+    timestamp: new Date().toISOString(),
+    method: 'GET',
+  })
+}
+
+export async function POST(request: NextRequest) {
+  try {
+    const body = await request.json()
+    
+    return NextResponse.json({
+      message: 'Data received successfully',
+      data: body,
+      timestamp: new Date().toISOString(),
+      method: 'POST',
+    })
+  } catch (error) {
+    return NextResponse.json({
+      error: 'Invalid JSON',
+    }, { status: 400 })
+  }
+}
+EOF
+
+# Create admin dashboard
+mkdir -p app/admin
+cat > app/admin/page.tsx << 'EOF'
+'use client'
+
+import { useState, useEffect } from 'react'
+
+interface AnalyticsSummary {
+  totalVisits: number
+  uniqueVisitors: number
+  topPages: { path: string; visits: number }[]
+  deviceStats: { device: string; count: number }[]
+  browserStats: { browser: string; count: number }[]
+}
+
+export default function AdminDashboard() {
+  const [token, setToken] = useState('')
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [isLoggedIn, setIsLoggedIn] = useState(false)
+  const [analytics, setAnalytics] = useState<AnalyticsSummary | null>(null)
+  const [days, setDays] = useState(7)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    const savedToken = localStorage.getItem('adminToken')
+    if (savedToken) {
+      setToken(savedToken)
+      setIsLoggedIn(true)
+      fetchAnalytics(savedToken, days)
+    }
+  }, [])
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setLoading(true)
+    setError('')
+
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+      })
+
+      if (res.ok) {
+        const data = await res.json()
+        setToken(data.token)
+        localStorage.setItem('adminToken', data.token)
+        setIsLoggedIn(true)
+        fetchAnalytics(data.token, days)
+      } else {
+        const data = await res.json()
+        setError(data.error || 'Invalid credentials')
+      }
+    } catch (error) {
+      setError('Login failed. Please check your connection.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleLogout = () => {
+    setToken('')
+    localStorage.removeItem('adminToken')
+    setIsLoggedIn(false)
+    setAnalytics(null)
+  }
+
+  const fetchAnalytics = async (authToken: string, daysParam: number) => {
+    setLoading(true)
+    setError('')
+    try {
+      const res = await fetch(`/api/analytics/summary?days=${daysParam}`, {
+        headers: { Authorization: `Bearer ${authToken}` },
+      })
+
+      if (res.ok) {
+        const data = await res.json()
+        setAnalytics(data)
+      } else {
+        setError('Failed to fetch analytics')
+        if (res.status === 401) {
+          handleLogout()
+        }
+      }
+    } catch (error) {
+      setError('Failed to fetch analytics')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleDaysChange = (newDays: number) => {
+    setDays(newDays)
+    if (token) {
+      fetchAnalytics(token, newDays)
+    }
+  }
+
+  if (!isLoggedIn) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-100">
+        <div className="bg-white p-8 rounded-lg shadow-md w-96">
+          <h1 className="text-2xl font-bold mb-6">Admin Login</h1>
+          {error && (
+            <div className="mb-4 p-3 bg-red-100 text-red-700 rounded-md text-sm">
+              {error}
+            </div>
+          )}
+          <form onSubmit={handleLogin}>
+            <div className="mb-4">
+              <label className="block text-sm font-medium mb-2 text-gray-700">Username</label>
+              <input
+                type="text"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900"
+                required
+                disabled={loading}
+              />
+            </div>
+            <div className="mb-6">
+              <label className="block text-sm font-medium mb-2 text-gray-700">Password</label>
+              <input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900"
+                required
+                disabled={loading}
+              />
+            </div>
+            <button
+              type="submit"
+              disabled={loading}
+              className="w-full bg-blue-600 text-white py-2 rounded-md hover:bg-blue-700 disabled:bg-gray-400 transition-colors"
+            >
+              {loading ? 'Logging in...' : 'Login'}
+            </button>
+          </form>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-100 p-8">
+      <div className="max-w-7xl mx-auto">
+        <div className="flex justify-between items-center mb-8">
+          <h1 className="text-3xl font-bold text-gray-900">Analytics Dashboard</h1>
+          <button
+            onClick={handleLogout}
+            className="bg-red-600 text-white px-4 py-2 rounded-md hover:bg-red-700 transition-colors"
+          >
+            Logout
+          </button>
+        </div>
+
+        {error && (
+          <div className="mb-4 p-3 bg-red-100 text-red-700 rounded-md">
+            {error}
+          </div>
+        )}
+
+        <div className="mb-6 flex gap-2">
+          {[7, 30, 90].map((d) => (
+            <button
+              key={d}
+              onClick={() => handleDaysChange(d)}
+              disabled={loading}
+              className={`px-4 py-2 rounded-md transition-colors ${
+                days === d
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-white text-gray-700 hover:bg-gray-100'
+              } disabled:opacity-50`}
+            >
+              Last {d} days
+            </button>
+          ))}
+        </div>
+
+        {loading ? (
+          <div className="text-center py-12">
+            <p className="text-xl text-gray-600">Loading analytics...</p>
+          </div>
+        ) : analytics ? (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            <div className="bg-white p-6 rounded-lg shadow">
+              <h2 className="text-lg font-semibold mb-2 text-gray-700">Total Visits</h2>
+              <p className="text-4xl font-bold text-blue-600">{analytics.totalVisits}</p>
+            </div>
+
+            <div className="bg-white p-6 rounded-lg shadow">
+              <h2 className="text-lg font-semibold mb-2 text-gray-700">Unique Visitors</h2>
+              <p className="text-4xl font-bold text-green-600">{analytics.uniqueVisitors}</p>
+            </div>
+
+            <div className="bg-white p-6 rounded-lg shadow">
+              <h2 className="text-lg font-semibold mb-2 text-gray-700">Avg. Visits/Visitor</h2>
+              <p className="text-4xl font-bold text-purple-600">
+                {analytics.uniqueVisitors > 0
+                  ? (analytics.totalVisits / analytics.uniqueVisitors).toFixed(1)
+                  : 0}
+              </p>
+            </div>
+
+            <div className="bg-white p-6 rounded-lg shadow col-span-1 md:col-span-2">
+              <h2 className="text-lg font-semibold mb-4 text-gray-700">Top Pages</h2>
+              {analytics.topPages.length > 0 ? (
+                <div className="space-y-2">
+                  {analytics.topPages.map((page, i) => (
+                    <div key={i} className="flex justify-between items-center">
+                      <span className="text-sm truncate text-gray-600">{page.path}</span>
+                      <span className="text-sm font-semibold ml-2 text-gray-900">{page.visits}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-gray-500 text-sm">No data available</p>
+              )}
+            </div>
+
+            <div className="bg-white p-6 rounded-lg shadow">
+              <h2 className="text-lg font-semibold mb-4 text-gray-700">Devices</h2>
+              {analytics.deviceStats.length > 0 ? (
+                <div className="space-y-2">
+                  {analytics.deviceStats.map((stat, i) => (
+                    <div key={i} className="flex justify-between items-center">
+                      <span className="text-sm text-gray-600">{stat.device}</span>
+                      <span className="text-sm font-semibold text-gray-900">{stat.count}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-gray-500 text-sm">No data available</p>
+              )}
+            </div>
+
+            <div className="bg-white p-6 rounded-lg shadow col-span-1 md:col-span-2 lg:col-span-3">
+              <h2 className="text-lg font-semibold mb-4 text-gray-700">Browsers</h2>
+              {analytics.browserStats.length > 0 ? (
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                  {analytics.browserStats.map((stat, i) => (
+                    <div key={i} className="text-center">
+                      <p className="text-2xl font-bold text-blue-600">{stat.count}</p>
+                      <p className="text-sm text-gray-600">{stat.browser}</p>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-gray-500 text-sm">No data available</p>
+              )}
+            </div>
+          </div>
+        ) : null}
+      </div>
+    </div>
+  )
+}
+EOF
+
+# Create home page
+cat > app/page.tsx << 'EOF'
+export default function Home() {
+  return (
+    <main className="flex min-h-screen flex-col items-center justify-center p-24 bg-gradient-to-br from-blue-50 to-indigo-100">
+      <div className="z-10 max-w-5xl w-full items-center justify-center font-mono text-sm">
+        <h1 className="text-5xl font-bold mb-4 text-center bg-gradient-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent">
+          Next.js Setup Complete! 🚀
+        </h1>
+        <p className="text-xl text-center text-gray-700 mb-8">
+          Your secure Next.js application with API and Analytics is now running
+        </p>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-8">
+          <div className="p-6 bg-white border border-gray-200 rounded-lg shadow-sm hover:shadow-md transition-shadow">
+            <h2 className="text-xl font-semibold mb-2 text-gray-900">API Endpoint</h2>
+            <p className="text-sm text-gray-600 mb-4">
+              Test the example API endpoint
+            </p>
+            <a
+              href="/api/example"
+              className="text-blue-600 hover:text-blue-800 hover:underline font-medium"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              /api/example →
+            </a>
+          </div>
+          <div className="p-6 bg-white border border-gray-200 rounded-lg shadow-sm hover:shadow-md transition-shadow">
+            <h2 className="text-xl font-semibold mb-2 text-gray-900">Admin Dashboard</h2>
+            <p className="text-sm text-gray-600 mb-4">
+              View analytics and insights
+            </p>
+            <a
+              href="/admin"
+              className="text-blue-600 hover:text-blue-800 hover:underline font-medium"
+            >
+              /admin →
+            </a>
+          </div>
+        </div>
+        <div className="mt-8 p-4 bg-white border border-gray-200 rounded-lg">
+          <p className="text-sm text-gray-500">
+            Server Time: {new Date().toISOString()}
+          </p>
+        </div>
+      </div>
+    </main>
+  )
+}
+EOF
+
+# Update next.config
+cat > next.config.ts << 'EOF'
+import type { NextConfig } from "next";
+
+const nextConfig: NextConfig = {
+  output: 'standalone',
+};
+
+export default nextConfig;
+EOF
+
+# Run Prisma migrations
+log_info "Running database migrations..."
+npx prisma generate
+npx prisma db push --accept-data-loss
+
+# Create initial admin user with proper error handling
+log_info "Creating admin user..."
+cat > $PROJECT_DIR/create-admin.js << ADMINEOF
+const { PrismaClient } = require('@prisma/client');
+const bcrypt = require('bcryptjs');
+
+const prisma = new PrismaClient();
+
+async function createAdmin() {
+  try {
+    const hash = await bcrypt.hash('$ADMIN_PASSWORD', 12);
+    const user = await prisma.user.upsert({
+      where: { username: '$ADMIN_USER' },
+      update: {
+        password: hash
+      },
+      create: {
+        username: '$ADMIN_USER',
+        password: hash,
+        role: 'admin'
+      }
+    });
+    console.log('Admin user created/updated successfully');
+  } catch (error) {
+    console.error('Error creating admin user:', error);
+    process.exit(1);
+  } finally {
+    await prisma.\$disconnect();
+  }
+}
+
+createAdmin();
+ADMINEOF
+
+cd $PROJECT_DIR && node create-admin.js || log_error "Failed to create admin user"
+rm $PROJECT_DIR/create-admin.js
+
+# Install dependencies and build
+log_info "Installing production dependencies..."
+npm ci --production=false
+
+log_info "Building Next.js app..."
+npm run build
+
+# Create systemd service
+log_info "Creating systemd service..."
+cat > /etc/systemd/system/$PROJECT_NAME.service << EOF
+[Unit]
+Description=Next.js App - $PROJECT_NAME
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=$PROJECT_DIR
+ExecStart=/usr/bin/npm start
+Restart=always
+RestartSec=10
+Environment=NODE_ENV=production
+Environment=PORT=$APP_PORT
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Set permissions
+log_info "Setting permissions..."
+chown -R www-data:www-data $PROJECT_DIR
+chmod -R 755 $PROJECT_DIR
+
+# Create initial Nginx config (HTTP only for certbot validation)
+log_info "Creating initial Nginx configuration..."
+cat > $NGINX_AVAILABLE << EOF
+server {
+    listen 80;
+    listen [::]:80;
+    server_name $DOMAIN $DOMAIN;
+    
+    location / {
+        proxy_pass http://localhost:$APP_PORT;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \\\$http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host \\\$host;
+        proxy_cache_bypass \\\$http_upgrade;
+        proxy_set_header X-Real-IP \\\$remote_addr;
+        proxy_set_header X-Forwarded-For \\\$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \\\$scheme;
+    }
+}
+EOF
+
+# Enable site
+ln -sf $NGINX_AVAILABLE $NGINX_ENABLED
+
+# Remove default nginx site if it exists
+if [[ -f /etc/nginx/sites-enabled/default ]]; then
+    rm -f /etc/nginx/sites-enabled/default
+fi
+
+# Test nginx config
+log_info "Testing Nginx configuration..."
+nginx -t || log_error "Nginx configuration test failed"
+
+# Restart nginx
+log_info "Restarting Nginx..."
+systemctl restart nginx
+
+# Start Next.js app
+log_info "Starting Next.js application..."
+systemctl daemon-reload
+systemctl enable $PROJECT_NAME
+systemctl start $PROJECT_NAME
+
+# Wait for app to start
+log_info "Waiting for application to start..."
+sleep 10
+
+# Check if app is running
+if systemctl is-active --quiet $PROJECT_NAME; then
+    log_info "Next.js app is running successfully"
+else
+    log_warn "Failed to start Next.js app. Checking logs..."
+    journalctl -u $PROJECT_NAME -n 50 --no-pager
+    log_error "Application failed to start. Check logs above."
+fi
+
+# Test if app responds
+log_info "Testing if application responds..."
+for i in {1..30}; do
+    if curl -s http://localhost:$APP_PORT > /dev/null; then
+        log_info "Application is responding on port $APP_PORT"
+        break
+    fi
+    if [[ $i -eq 30 ]]; then
+        log_error "Application not responding after 30 seconds"
+    fi
+    sleep 1
+done
+
+# Obtain SSL certificate
+log_info "Obtaining SSL certificate from Let's Encrypt..."
+log_warn "Make sure your domain $DOMAIN points to this server's IP address!"
+
+# Try to get certificate for both root and www
+if certbot --nginx -d $DOMAIN -d $DOMAIN --non-interactive --agree-tos --email $EMAIL --redirect; then
+    log_info "SSL certificate obtained successfully for $DOMAIN and $DOMAIN"
+    SSL_SUCCESS=true
+else
+    log_warn "Failed to obtain certificate for $DOMAIN. Retrying with root domain only..."
+    # Fallback: Try root domain only
+    if certbot --nginx -d $DOMAIN --non-interactive --agree-tos --email $EMAIL --redirect; then
+        log_info "SSL certificate obtained successfully for $DOMAIN (excluding www)"
+        SSL_SUCCESS=true
+    else
+        log_error "SSL certificate request failed completely. Please check your DNS settings."
+        SSL_SUCCESS=false
+    fi
+fi
+
+if [ "$SSL_SUCCESS" = true ]; then
+    # Create secure Nginx config with analytics logging
+    log_info "Creating secure Nginx configuration with analytics..."
+    
+    # Add log format to main nginx.conf if not already present
+    if ! grep -q "log_format analytics_log" /etc/nginx/nginx.conf; then
+        log_info "Adding analytics log format to nginx.conf..."
+        sed -i '/include \/etc\/nginx\/sites-enabled/i \    # Analytics log format\n    log_format analytics_log escape=json '"'"'{\n        "time": "$time_iso8601",\n        "ip": "$remote_addr",\n        "method": "$request_method",\n        "uri": "$request_uri",\n        "status": $status,\n        "bytes_sent": $bytes_sent,\n        "bytes_received": $request_length,\n        "request_time": $request_time,\n        "referer": "$http_referer",\n        "user_agent": "$http_user_agent"\n    }'"'"';\n' /etc/nginx/nginx.conf
+    else
+        log_info "Analytics log format already configured in nginx.conf"
+    fi
+    
+    # Add rate limiting zones to main nginx.conf if not already present
+    if ! grep -q "zone=api_limit" /etc/nginx/nginx.conf; then
+        log_info "Adding rate limiting zones to nginx.conf..."
+        sed -i '/include \/etc\/nginx\/sites-enabled/i \    # Rate limiting zones for all sites\n    limit_req_zone $binary_remote_addr zone=api_limit:10m rate=10r/s;\n    limit_req_zone $binary_remote_addr zone=general_limit:10m rate=100r/s;\n' /etc/nginx/nginx.conf
+    else
+        log_info "Rate limiting zones already configured in nginx.conf"
+    fi
+    
+    # Create Nginx config WITHOUT log_format or limit_req_zone directives (they're now global)
+    cat > $NGINX_AVAILABLE << 'NGINXEOF'
+# Redirect www to non-www (HTTPS)
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name www.DOMAIN_PLACEHOLDER;
+    
+    ssl_certificate /etc/letsencrypt/live/DOMAIN_PLACEHOLDER/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/DOMAIN_PLACEHOLDER/privkey.pem;
+    
+    return 301 https://DOMAIN_PLACEHOLDER$request_uri;
+}
+
+# Main server block
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name DOMAIN_PLACEHOLDER;
+
+    # SSL Configuration
+    ssl_certificate /etc/letsencrypt/live/DOMAIN_PLACEHOLDER/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/DOMAIN_PLACEHOLDER/privkey.pem;
+    ssl_session_timeout 1d;
+    ssl_session_cache shared:SSL:50m;
+    ssl_session_tickets off;
+
+    # Modern SSL configuration
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers 'ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384';
+    ssl_prefer_server_ciphers off;
+
+    # OCSP Stapling
+    ssl_stapling on;
+    ssl_stapling_verify on;
+    ssl_trusted_certificate /etc/letsencrypt/live/DOMAIN_PLACEHOLDER/chain.pem;
+    resolver 8.8.8.8 8.8.4.4 valid=300s;
+    resolver_timeout 5s;
+
+    # Security Headers
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
+
+    # Logging with analytics format
+    access_log /var/log/nginx/DOMAIN_PLACEHOLDER.access.log analytics_log;
+    error_log /var/log/nginx/DOMAIN_PLACEHOLDER.error.log;
+
+    # Gzip compression
+    gzip on;
+    gzip_vary on;
+    gzip_proxied any;
+    gzip_comp_level 6;
+    gzip_types text/plain text/css text/xml text/javascript application/json application/javascript application/xml+rss application/rss+xml font/truetype font/opentype application/vnd.ms-fontobject image/svg+xml;
+
+    # Client body size
+    client_max_body_size 10M;
+
+    # Proxy settings
+    location / {
+        limit_req zone=general_limit burst=20 nodelay;
+        
+        proxy_pass http://localhost:APP_PORT_PLACEHOLDER;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_cache_bypass $http_upgrade;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        
+        # Timeouts
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
+    }
+
+    # Next.js static files with long cache
+    location /_next/static {
+        proxy_pass http://localhost:APP_PORT_PLACEHOLDER;
+        add_header Cache-Control "public, max-age=31536000, immutable";
+    }
+
+    # API routes with stricter rate limiting
+    location /api {
+        limit_req zone=api_limit burst=5 nodelay;
+        
+        proxy_pass http://localhost:APP_PORT_PLACEHOLDER;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # Security - block sensitive files
+    location ~ /\. {
+        deny all;
+    }
+    
+    location ~ \.(env|log|sql|db)$ {
+        deny all;
+    }
+}
+
+# HTTP to HTTPS redirect
+server {
+    listen 80;
+    listen [::]:80;
+    server_name DOMAIN_PLACEHOLDER www.DOMAIN_PLACEHOLDER;
+    return 301 https://DOMAIN_PLACEHOLDER$request_uri;
+}
+NGINXEOF
+
+    # Replace placeholders with actual values
+    sed -i "s/DOMAIN_PLACEHOLDER/$DOMAIN/g" $NGINX_AVAILABLE
+    sed -i "s/APP_PORT_PLACEHOLDER/$APP_PORT/g" $NGINX_AVAILABLE
+
+    # Test nginx config
+    log_info "Testing final Nginx configuration..."
+    if nginx -t; then
+        # Reload nginx
+        log_info "Reloading Nginx with secure configuration..."
+        systemctl reload nginx
+    else
+        log_error "Nginx configuration test failed. Reverting to HTTP only to keep site online."
+        exit 1
+    fi
+else
+    log_warn "Skipping SSL Nginx configuration due to Certbot failure. Site running on HTTP."
+fi
+
+# Setup automatic certificate renewal
+log_info "Setting up automatic SSL certificate renewal..."
+systemctl enable certbot.timer
+systemctl start certbot.timer
+
+# Create credentials file
+CREDS_FILE="$PROJECT_DIR/CREDENTIALS.txt"
+cat > $CREDS_FILE << EOF
+========================================
+SETUP COMPLETE - CREDENTIALS
+========================================
+
+Domain: https://$DOMAIN
+Admin Dashboard: https://$DOMAIN/admin
+
+Admin Credentials:
+  Username: $ADMIN_USER
+  Password: $ADMIN_PASSWORD
+
+Database: $DB_TYPE
+EOF
+
+if [[ "$DB_TYPE" == "mariadb" ]]; then
+    cat >> $CREDS_FILE << EOF
+  Database: $DB_NAME
+  User: $DB_USER
+  Password: $DB_PASSWORD
+  Host: $DB_HOST
+  Port: $DB_PORT
+  Connection: mysql -u $DB_USER -p'$DB_PASSWORD' $DB_NAME
+EOF
+else
+    cat >> $CREDS_FILE << EOF
+  Database File: $PROJECT_DIR/analytics.db
+EOF
+fi
+
+cat >> $CREDS_FILE << EOF
+
+Project Directory: $PROJECT_DIR
+Service Name: $PROJECT_NAME
+
+API Endpoints:
+  - GET  /api/example - Example API endpoint
+  - POST /api/example - Example POST endpoint
+  - POST /api/auth/login - Admin login
+  - GET  /api/analytics/summary - Analytics summary
+  - GET  /api/analytics/detailed - Detailed analytics
+  - GET  /api/analytics/traffic - Traffic stats
+
+Useful Commands:
+  - View app logs: journalctl -u $PROJECT_NAME -f
+  - Restart app: systemctl restart $PROJECT_NAME
+  - Check status: systemctl status $PROJECT_NAME
+  - Nginx logs: tail -f /var/log/nginx/$DOMAIN.access.log
+  - SSL test: certbot certificates
+  - Renew SSL: certbot renew
+  - Database console (MariaDB): mysql -u $DB_USER -p'$DB_PASSWORD' $DB_NAME
+
+Security Features Enabled:
+  ✓ TLS 1.2/1.3 with strong ciphers
+  ✓ HSTS with preload
+  ✓ Security headers (X-Frame-Options, CSP, etc.)
+  ✓ OCSP stapling
+  ✓ Automatic certificate renewal
+  ✓ Request/response analytics tracking
+  ✓ Bandwidth monitoring
+  ✓ JWT-based admin authentication
+  ✓ Rate limiting (API: 10req/s, General: 100req/s)
+  ✓ Gzip compression
+
+========================================
+IMPORTANT: Save these credentials securely!
+========================================
+EOF
+
+chmod 600 $CREDS_FILE
+
+# Display final status
+echo ""
+echo "=========================================="
+log_info "🎉 Setup completed successfully!"
+echo "=========================================="
+echo ""
+cat $CREDS_FILE
+echo ""
+echo "Credentials saved to: $CREDS_FILE"
+echo ""
+
+if [[ "$AUTO_GENERATED_PASS" == true ]]; then
+    log_warn "Admin password was auto-generated. Please save it securely!"
+fi
+
+echo "Your Next.js app with API and Analytics is now live!"
+echo "Visit: https://$DOMAIN"
+echo "=========================================="
