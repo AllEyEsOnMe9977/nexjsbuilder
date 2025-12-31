@@ -293,18 +293,23 @@ fi
 # Find a random free port between 3000 and 9000
 find_free_port() {
     local port
-    while true; do
+    local attempts=0
+    local max_attempts=100
+    
+    while [[ $attempts -lt $max_attempts ]]; do
         # Generate random port between 3000 and 9000
-        # RANDOM gives 0-32767. Modulo 6001 gives 0-6000. + 3000 gives 3000-9000.
-        port=$(( 3000 + RANDOM % 6001 ))
+        port=$(shuf -i 3000-9000 -n 1)
         
         # Check if port is in use using lsof
-        # If output is empty (! ...), the port is free
         if ! lsof -Pi :$port -sTCP:LISTEN -t >/dev/null 2>&1; then
             echo $port
-            break
+            return 0
         fi
+        
+        attempts=$((attempts + 1))
     done
+    
+    log_error "Could not find a free port after $max_attempts attempts"
 }
 
 log_info "Scanning for a random available port..."
@@ -321,23 +326,14 @@ log_info "Creating Next.js application..."
 export NEXT_TELEMETRY_DISABLED=1
 npx --yes create-next-app@latest . --typescript --tailwind --app --no-src-dir --import-alias "@/*" --use-npm --yes
 
-
 # Install additional dependencies
 log_info "Installing additional dependencies..."
-# FIX: Pin Prisma to v5 to avoid v7 breaking changes with prisma.config.ts
 npm install @prisma/client@5 bcryptjs jsonwebtoken
 npm install -D prisma@5 @types/bcryptjs @types/jsonwebtoken
 
 # Initialize Prisma
 log_info "Setting up Prisma ORM..."
 npx prisma init --datasource-provider $([[ "$DB_TYPE" == "sqlite" ]] && echo "sqlite" || echo "mysql")
-
-# FIX: Remove prisma.config.ts to prevent conflict with schema.prisma in Prisma 7+
-# This forces Prisma to read the configuration from schema.prisma as intended
-if [[ -f prisma.config.ts ]]; then
-    rm prisma.config.ts
-    log_info "Removed prisma.config.ts to maintain compatibility"
-fi
 
 # Create Prisma schema
 log_info "Creating database schema..."
@@ -405,7 +401,20 @@ ADMIN_USERNAME="$ADMIN_USER"
 ADMIN_PASSWORD="$ADMIN_PASSWORD"
 NEXT_PUBLIC_SITE_URL="https://$DOMAIN"
 NODE_ENV=production
+PORT=$APP_PORT
 EOF
+
+# Secure .env file
+chmod 600 .env
+
+# Ensure .env is in .gitignore
+if [[ -f .gitignore ]]; then
+    if ! grep -q "^\.env$" .gitignore; then
+        echo ".env" >> .gitignore
+    fi
+else
+    echo ".env" > .gitignore
+fi
 
 # Create lib directory structure
 mkdir -p lib
@@ -453,7 +462,7 @@ export function verifyToken(token: string): { userId: string; username: string }
 }
 EOF
 
-# Create analytics utility
+# Create analytics utility with improved error handling
 cat > lib/analytics.ts << 'EOF'
 import { prisma } from './db'
 
@@ -574,17 +583,16 @@ export async function getAnalyticsSummary(days: number = 7) {
 }
 EOF
 
-# Create middleware for analytics
+# Create improved middleware with direct function call
 cat > middleware.ts << 'EOF'
 import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
+import { logAnalytics } from '@/lib/analytics'
 
-export async function middleware(request: NextRequest) {
-  const response = NextResponse.next()
-  const startTime = Date.now()
-  
-  // 1. Robust IP Extraction
+// Helper to extract IP address
+function extractIP(request: NextRequest): string {
   let ip = '127.0.0.1'
+  
   try {
     const forwardedFor = request.headers.get('x-forwarded-for')
     const realIp = request.headers.get('x-real-ip')
@@ -596,38 +604,40 @@ export async function middleware(request: NextRequest) {
     }
     
     // Clean IPv6 prefix
-    if (ip.startsWith('::ffff:')) ip = ip.substring(7)
-  } catch (e) {
-    console.error('Middleware IP extraction error:', e)
+    if (ip.startsWith('::ffff:')) {
+      ip = ip.substring(7)
+    }
+  } catch (error) {
+    console.error('IP extraction error:', error)
   }
+  
+  return ip
+}
 
-  // 2. Fire-and-forget Analytics Logging
-  // We use 127.0.0.1 to avoid DNS/SSL loopback issues. 
-  // We assume port is in process.env.PORT or default to 3000.
-  const port = process.env.PORT || 3000
-  const logUrl = `http://127.0.0.1:${port}/api/internal/analytics`
-
-  const analyticsData = {
+export async function middleware(request: NextRequest) {
+  const startTime = Date.now()
+  const response = NextResponse.next()
+  
+  // Extract request data
+  const ip = extractIP(request)
+  const userAgent = request.headers.get('user-agent') || undefined
+  const method = request.method
+  const path = request.nextUrl.pathname
+  const referer = request.headers.get('referer') || undefined
+  
+  // Log analytics in background (non-blocking)
+  // This direct function call is more efficient than HTTP request
+  logAnalytics({
     ip,
-    userAgent: request.headers.get('user-agent'),
-    method: request.method,
-    path: request.nextUrl.pathname,
+    userAgent,
+    method,
+    path,
     statusCode: response.status,
-    responseTime: 0, // Placeholder, calculated roughly below
-    referer: request.headers.get('referer'),
-  }
-
-  // Execute the fetch without awaiting it (non-blocking)
-  fetch(logUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      ...analyticsData,
-      responseTime: Date.now() - startTime
-    }),
-  }).catch(err => {
-    // This log will show up in: journalctl -u your-service-name
-    console.error(`[Analytics Fail] Could not log to ${logUrl}:`, err.message)
+    responseTime: Date.now() - startTime,
+    referer,
+  }).catch(error => {
+    // Errors logged but don't block response
+    console.error('[Analytics] Logging failed:', error.message)
   })
   
   return response
@@ -641,13 +651,13 @@ export const config = {
      * - _next/static (static files)
      * - _next/image (image optimization files)
      * - admin (admin dashboard)
+     * - favicon.ico (favicon file)
      * - Any path containing a dot "." (excludes files like .png, .json, .xml, .txt)
      */
-    '/((?!api|_next/static|_next/image|admin|.*\\..*).*)',
+    '/((?!api|_next/static|_next/image|admin|favicon.ico|.*\\..*).*)',
   ],
 }
 EOF
-
 
 # Create API routes directory structure
 log_info "Creating API directory structure..."
@@ -655,8 +665,36 @@ mkdir -p app/api/auth/login
 mkdir -p app/api/analytics/summary
 mkdir -p app/api/analytics/detailed
 mkdir -p app/api/analytics/traffic
-mkdir -p app/api/internal/analytics
+mkdir -p app/api/health
 mkdir -p app/api/example
+
+# Health check endpoint
+cat > app/api/health/route.ts << 'EOF'
+import { NextResponse } from 'next/server'
+import { prisma } from '@/lib/db'
+
+export async function GET() {
+  try {
+    // Test database connection
+    await prisma.$queryRaw`SELECT 1`
+    
+    return NextResponse.json({ 
+      status: 'healthy',
+      timestamp: new Date().toISOString(),
+      database: 'connected',
+      uptime: process.uptime()
+    })
+  } catch (error) {
+    console.error('Health check failed:', error)
+    return NextResponse.json({ 
+      status: 'unhealthy',
+      timestamp: new Date().toISOString(),
+      database: 'disconnected',
+      error: error instanceof Error ? error.message : 'Unknown error'
+    }, { status: 503 })
+  }
+}
+EOF
 
 # Auth login API
 cat > app/api/auth/login/route.ts << 'EOF'
@@ -732,6 +770,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import { verifyToken } from '@/lib/auth'
 import { prisma } from '@/lib/db'
 
+export const dynamic = 'force-dynamic'
+
 export async function GET(request: NextRequest) {
   try {
     const token = request.headers.get('authorization')?.replace('Bearer ', '')
@@ -779,6 +819,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import { verifyToken } from '@/lib/auth'
 import { prisma } from '@/lib/db'
 
+export const dynamic = 'force-dynamic'
+
 export async function GET(request: NextRequest) {
   try {
     const token = request.headers.get('authorization')?.replace('Bearer ', '')
@@ -808,23 +850,6 @@ export async function GET(request: NextRequest) {
   } catch (error) {
     console.error('Traffic stats error:', error)
     return NextResponse.json({ error: 'Failed to fetch traffic stats' }, { status: 500 })
-  }
-}
-EOF
-
-# Internal analytics logging endpoint
-cat > app/api/internal/analytics/route.ts << 'EOF'
-import { NextRequest, NextResponse } from 'next/server'
-import { logAnalytics } from '@/lib/analytics'
-
-export async function POST(request: NextRequest) {
-  try {
-    const data = await request.json()
-    await logAnalytics(data)
-    return NextResponse.json({ success: true })
-  } catch (error) {
-    console.error('Internal analytics logging error:', error)
-    return NextResponse.json({ error: 'Failed to log analytics' }, { status: 500 })
   }
 }
 EOF
@@ -1265,7 +1290,7 @@ cat > $NGINX_AVAILABLE << EOF
 server {
     listen 80;
     listen [::]:80;
-    server_name $DOMAIN $DOMAIN;
+    server_name $DOMAIN www.$DOMAIN;
     
     location / {
         proxy_pass http://localhost:$APP_PORT;
@@ -1329,47 +1354,58 @@ for i in {1..30}; do
     sleep 1
 done
 
+# Health check test
+log_info "Running health check..."
+if curl -f http://localhost:$APP_PORT/api/health > /dev/null 2>&1; then
+    log_info "Health check passed"
+else
+    log_warn "Health check failed, but continuing..."
+fi
+
 # Obtain SSL certificate
 log_info "Obtaining SSL certificate from Let's Encrypt..."
 log_warn "Make sure your domain $DOMAIN points to this server's IP address!"
 
 # Try to get certificate for both root and www
-if certbot --nginx -d $DOMAIN -d $DOMAIN --non-interactive --agree-tos --email $EMAIL --redirect; then
-    log_info "SSL certificate obtained successfully for $DOMAIN and $DOMAIN"
+SSL_SUCCESS=false
+if certbot --nginx -d $DOMAIN -d www.$DOMAIN --non-interactive --agree-tos --email $EMAIL --redirect; then
+    log_info "SSL certificate obtained successfully for $DOMAIN and www.$DOMAIN"
     SSL_SUCCESS=true
 else
-    log_warn "Failed to obtain certificate for $DOMAIN. Retrying with root domain only..."
+    log_warn "Failed to obtain certificate for both domains. Retrying with root domain only..."
     # Fallback: Try root domain only
     if certbot --nginx -d $DOMAIN --non-interactive --agree-tos --email $EMAIL --redirect; then
         log_info "SSL certificate obtained successfully for $DOMAIN (excluding www)"
         SSL_SUCCESS=true
     else
-        log_error "SSL certificate request failed completely. Please check your DNS settings."
+        log_warn "SSL certificate request failed. Site will run on HTTP only."
+        log_warn "Please check: 1) DNS points to this server, 2) Port 80/443 are open, 3) Domain is accessible"
         SSL_SUCCESS=false
     fi
 fi
 
 if [ "$SSL_SUCCESS" = true ]; then
-    # Create secure Nginx config with analytics logging
-    log_info "Creating secure Nginx configuration with analytics..."
+    # Add log format and rate limiting to main nginx.conf if not already present
+    log_info "Configuring Nginx global settings..."
     
-    # Add log format to main nginx.conf if not already present
+    # Check and add analytics log format
     if ! grep -q "log_format analytics_log" /etc/nginx/nginx.conf; then
         log_info "Adding analytics log format to nginx.conf..."
-        sed -i '/include \/etc\/nginx\/sites-enabled/i \    # Analytics log format\n    log_format analytics_log escape=json '"'"'{\n        "time": "$time_iso8601",\n        "ip": "$remote_addr",\n        "method": "$request_method",\n        "uri": "$request_uri",\n        "status": $status,\n        "bytes_sent": $bytes_sent,\n        "bytes_received": $request_length,\n        "request_time": $request_time,\n        "referer": "$http_referer",\n        "user_agent": "$http_user_agent"\n    }'"'"';\n' /etc/nginx/nginx.conf
+        sed -i '/http {/a \    # Analytics log format\n    log_format analytics_log escape=json '"'"'{\n        "time": "$time_iso8601",\n        "ip": "$remote_addr",\n        "method": "$request_method",\n        "uri": "$request_uri",\n        "status": $status,\n        "bytes_sent": $bytes_sent,\n        "bytes_received": $request_length,\n        "request_time": $request_time,\n        "referer": "$http_referer",\n        "user_agent": "$http_user_agent"\n    }'"'"';\n' /etc/nginx/nginx.conf
     else
-        log_info "Analytics log format already configured in nginx.conf"
+        log_info "Analytics log format already configured"
     fi
     
-    # Add rate limiting zones to main nginx.conf if not already present
-    if ! grep -q "zone=api_limit" /etc/nginx/nginx.conf; then
+    # Check and add rate limiting zones (check for project-specific zones)
+    if ! grep -q "zone=${PROJECT_NAME}_api" /etc/nginx/nginx.conf; then
         log_info "Adding rate limiting zones to nginx.conf..."
-        sed -i '/include \/etc\/nginx\/sites-enabled/i \    # Rate limiting zones for all sites\n    limit_req_zone $binary_remote_addr zone=api_limit:10m rate=10r/s;\n    limit_req_zone $binary_remote_addr zone=general_limit:10m rate=100r/s;\n' /etc/nginx/nginx.conf
+        sed -i '/http {/a \    # Rate limiting zones for '"$PROJECT_NAME"'\n    limit_req_zone $binary_remote_addr zone='"${PROJECT_NAME}"'_api:10m rate=10r/s;\n    limit_req_zone $binary_remote_addr zone='"${PROJECT_NAME}"'_general:10m rate=100r/s;\n' /etc/nginx/nginx.conf
     else
-        log_info "Rate limiting zones already configured in nginx.conf"
+        log_info "Rate limiting zones already configured for this project"
     fi
     
-    # Create Nginx config WITHOUT log_format or limit_req_zone directives (they're now global)
+    # Create secure Nginx configuration
+    log_info "Creating secure Nginx configuration..."
     cat > $NGINX_AVAILABLE << 'NGINXEOF'
 # Redirect www to non-www (HTTPS)
 server {
@@ -1432,7 +1468,7 @@ server {
 
     # Proxy settings
     location / {
-        limit_req zone=general_limit burst=20 nodelay;
+        limit_req zone=PROJECT_NAME_PLACEHOLDER_general burst=20 nodelay;
         
         proxy_pass http://localhost:APP_PORT_PLACEHOLDER;
         proxy_http_version 1.1;
@@ -1458,7 +1494,7 @@ server {
 
     # API routes with stricter rate limiting
     location /api {
-        limit_req zone=api_limit burst=5 nodelay;
+        limit_req zone=PROJECT_NAME_PLACEHOLDER_api burst=5 nodelay;
         
         proxy_pass http://localhost:APP_PORT_PLACEHOLDER;
         proxy_http_version 1.1;
@@ -1487,28 +1523,66 @@ server {
 }
 NGINXEOF
 
-    # Replace placeholders with actual values
+    # Replace placeholders
     sed -i "s/DOMAIN_PLACEHOLDER/$DOMAIN/g" $NGINX_AVAILABLE
     sed -i "s/APP_PORT_PLACEHOLDER/$APP_PORT/g" $NGINX_AVAILABLE
+    sed -i "s/PROJECT_NAME_PLACEHOLDER/$PROJECT_NAME/g" $NGINX_AVAILABLE
 
-    # Test nginx config
+    # Test and reload nginx
     log_info "Testing final Nginx configuration..."
     if nginx -t; then
-        # Reload nginx
         log_info "Reloading Nginx with secure configuration..."
         systemctl reload nginx
+        log_info "SSL configuration applied successfully"
     else
-        log_error "Nginx configuration test failed. Reverting to HTTP only to keep site online."
-        exit 1
+        log_error "Nginx configuration test failed after SSL setup"
     fi
 else
-    log_warn "Skipping SSL Nginx configuration due to Certbot failure. Site running on HTTP."
+    log_warn "Running on HTTP only due to SSL certificate failure"
 fi
 
 # Setup automatic certificate renewal
 log_info "Setting up automatic SSL certificate renewal..."
-systemctl enable certbot.timer
-systemctl start certbot.timer
+systemctl enable certbot.timer 2>/dev/null || true
+systemctl start certbot.timer 2>/dev/null || true
+
+# Create backup script
+log_info "Creating backup utility..."
+cat > "$PROJECT_DIR/backup.sh" << 'BACKUPEOF'
+#!/bin/bash
+PROJECT_NAME="PROJECT_NAME_PLACEHOLDER"
+DB_TYPE="DB_TYPE_PLACEHOLDER"
+BACKUP_DIR="/var/backups/$PROJECT_NAME"
+
+mkdir -p "$BACKUP_DIR"
+
+if [[ "$DB_TYPE" == "mariadb" ]]; then
+    DB_USER="DB_USER_PLACEHOLDER"
+    DB_PASSWORD="DB_PASSWORD_PLACEHOLDER"
+    DB_NAME="DB_NAME_PLACEHOLDER"
+    mysqldump -u "$DB_USER" -p"$DB_PASSWORD" "$DB_NAME" | gzip > "$BACKUP_DIR/db_$(date +%Y%m%d_%H%M%S).sql.gz"
+    echo "MariaDB backup created"
+else
+    if [[ -f "analytics.db" ]]; then
+        cp analytics.db "$BACKUP_DIR/db_$(date +%Y%m%d_%H%M%S).db"
+        echo "SQLite backup created"
+    fi
+fi
+
+# Keep only last 7 backups
+ls -t "$BACKUP_DIR"/db_* | tail -n +8 | xargs -r rm
+echo "Backup completed. Location: $BACKUP_DIR"
+BACKUPEOF
+
+# Replace placeholders in backup script
+sed -i "s/PROJECT_NAME_PLACEHOLDER/$PROJECT_NAME/g" "$PROJECT_DIR/backup.sh"
+sed -i "s/DB_TYPE_PLACEHOLDER/$DB_TYPE/g" "$PROJECT_DIR/backup.sh"
+if [[ "$DB_TYPE" == "mariadb" ]]; then
+    sed -i "s/DB_USER_PLACEHOLDER/$DB_USER/g" "$PROJECT_DIR/backup.sh"
+    sed -i "s/DB_PASSWORD_PLACEHOLDER/$DB_PASSWORD/g" "$PROJECT_DIR/backup.sh"
+    sed -i "s/DB_NAME_PLACEHOLDER/$DB_NAME/g" "$PROJECT_DIR/backup.sh"
+fi
+chmod +x "$PROJECT_DIR/backup.sh"
 
 # Create credentials file
 CREDS_FILE="$PROJECT_DIR/CREDENTIALS.txt"
@@ -1546,8 +1620,10 @@ cat >> $CREDS_FILE << EOF
 
 Project Directory: $PROJECT_DIR
 Service Name: $PROJECT_NAME
+Application Port: $APP_PORT
 
 API Endpoints:
+  - GET  /api/health - Health check endpoint
   - GET  /api/example - Example API endpoint
   - POST /api/example - Example POST endpoint
   - POST /api/auth/login - Admin login
@@ -1562,7 +1638,16 @@ Useful Commands:
   - Nginx logs: tail -f /var/log/nginx/$DOMAIN.access.log
   - SSL test: certbot certificates
   - Renew SSL: certbot renew
-  - Database console (MariaDB): mysql -u $DB_USER -p'$DB_PASSWORD' $DB_NAME
+  - Create backup: $PROJECT_DIR/backup.sh
+EOF
+
+if [[ "$DB_TYPE" == "mariadb" ]]; then
+    cat >> $CREDS_FILE << EOF
+  - Database console: mysql -u $DB_USER -p'$DB_PASSWORD' $DB_NAME
+EOF
+fi
+
+cat >> $CREDS_FILE << EOF
 
 Security Features Enabled:
   ✓ TLS 1.2/1.3 with strong ciphers
@@ -1575,6 +1660,8 @@ Security Features Enabled:
   ✓ JWT-based admin authentication
   ✓ Rate limiting (API: 10req/s, General: 100req/s)
   ✓ Gzip compression
+  ✓ Health check endpoint
+  ✓ Automated backup script
 
 ========================================
 IMPORTANT: Save these credentials securely!
@@ -1598,6 +1685,17 @@ if [[ "$AUTO_GENERATED_PASS" == true ]]; then
     log_warn "Admin password was auto-generated. Please save it securely!"
 fi
 
-echo "Your Next.js app with API and Analytics is now live!"
-echo "Visit: https://$DOMAIN"
+if [ "$SSL_SUCCESS" = true ]; then
+    echo "Your Next.js app is now live at: https://$DOMAIN"
+else
+    echo "Your Next.js app is running at: http://$DOMAIN"
+    log_warn "SSL setup failed. You can manually configure it later with: certbot --nginx -d $DOMAIN"
+fi
+
+echo "=========================================="
+log_info "Post-installation recommendations:"
+echo "  1. Run a backup: $PROJECT_DIR/backup.sh"
+echo "  2. Test your site: curl -I https://$DOMAIN"
+echo "  3. Check health: curl https://$DOMAIN/api/health"
+echo "  4. Monitor logs: journalctl -u $PROJECT_NAME -f"
 echo "=========================================="
