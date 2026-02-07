@@ -377,11 +377,11 @@ model Analytics {
   statusCode    Int
   responseTime  Int
   referer       String?  $([[ "$DB_TYPE" == "mariadb" ]] && echo "@db.Text" || echo "")
-  country       String?
-  city          String?
-  device        String?
-  browser       String?
-  os            String?
+  country       String?  @db.VarChar(100)
+  city          String?  @db.VarChar(100)
+  device        String?  @db.VarChar(50)
+  browser       String?  @db.VarChar(50)
+  os            String?  @db.VarChar(50)
   bytesIn       Int      @default(0)
   bytesOut      Int      @default(0)
   
@@ -404,9 +404,18 @@ model ApiStats {
 EOF
 
 # Create .env file
+# Create .env file
 log_info "Creating environment configuration..."
+
+# Construct proper DATABASE_URL based on DB type
+if [[ "$DB_TYPE" == "mariadb" ]]; then
+    FINAL_DB_URL="mysql://$DB_USER:$DB_PASSWORD@$DB_HOST:$DB_PORT/$DB_NAME?connection_limit=5&pool_timeout=10"
+else
+    FINAL_DB_URL="file:./analytics.db"
+fi
+
 cat > .env << EOF
-DATABASE_URL="$DB_URL"
+DATABASE_URL="$FINAL_DB_URL"
 JWT_SECRET="$(generate_password)"
 ADMIN_USERNAME="$ADMIN_USER"
 ADMIN_PASSWORD="$ADMIN_PASSWORD"
@@ -439,10 +448,12 @@ const globalForPrisma = globalThis as unknown as {
 }
 
 export const prisma = globalForPrisma.prisma ?? new PrismaClient({
-  log: process.env.NODE_ENV === 'development' ? ['query', 'error', 'warn'] : ['error'],
+  log: process.env.NODE_ENV === 'development' ? ['error', 'warn'] : ['error'],
 })
 
 if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = prisma
+
+export default prisma
 EOF
 
 # Create auth utility
@@ -474,6 +485,7 @@ export function verifyToken(token: string): { userId: string; username: string }
 EOF
 
 # Create analytics utility with improved error handling
+# Create analytics utility with improved error handling
 cat > lib/analytics.ts << 'EOF'
 import { prisma } from './db'
 
@@ -485,18 +497,31 @@ interface AnalyticsData {
   statusCode: number
   responseTime: number
   referer?: string
-  bytesIn?: number
-  bytesOut?: number
+}
+
+// Helper to parse User Agent (Basic)
+function parseUserAgent(ua: string) {
+  const device = /mobile/i.test(ua) ? 'Mobile' : /tablet|ipad/i.test(ua) ? 'Tablet' : 'Desktop'
+  
+  let browser = 'Other'
+  if (/chrome/i.test(ua) && !/edge|edg/i.test(ua)) browser = 'Chrome'
+  else if (/firefox/i.test(ua)) browser = 'Firefox'
+  else if (/safari/i.test(ua) && !/chrome/i.test(ua)) browser = 'Safari'
+  else if (/edge|edg/i.test(ua)) browser = 'Edge'
+
+  let os = 'Other'
+  if (/windows/i.test(ua)) os = 'Windows'
+  else if (/mac os/i.test(ua)) os = 'macOS'
+  else if (/linux/i.test(ua)) os = 'Linux'
+  else if (/android/i.test(ua)) os = 'Android'
+  else if (/ios|iphone|ipad/i.test(ua)) os = 'iOS'
+
+  return { device, browser, os }
 }
 
 export async function logAnalytics(data: AnalyticsData) {
   try {
-    const userAgent = data.userAgent || ''
-    
-    // Parse user agent for device, browser, OS info
-    const device = getDevice(userAgent)
-    const browser = getBrowser(userAgent)
-    const os = getOS(userAgent)
+    const { device, browser, os } = parseUserAgent(data.userAgent || '')
     
     await prisma.analytics.create({
       data: {
@@ -510,8 +535,8 @@ export async function logAnalytics(data: AnalyticsData) {
         device,
         browser,
         os,
-        bytesIn: data.bytesIn || 0,
-        bytesOut: data.bytesOut || 0,
+        bytesIn: 0,
+        bytesOut: 0,
       },
     })
   } catch (error) {
@@ -519,42 +544,22 @@ export async function logAnalytics(data: AnalyticsData) {
   }
 }
 
-function getDevice(ua: string): string {
-  if (/mobile/i.test(ua)) return 'Mobile'
-  if (/tablet|ipad/i.test(ua)) return 'Tablet'
-  return 'Desktop'
-}
-
-function getBrowser(ua: string): string {
-  if (/chrome/i.test(ua) && !/edge|edg/i.test(ua)) return 'Chrome'
-  if (/firefox/i.test(ua)) return 'Firefox'
-  if (/safari/i.test(ua) && !/chrome/i.test(ua)) return 'Safari'
-  if (/edge|edg/i.test(ua)) return 'Edge'
-  return 'Other'
-}
-
-function getOS(ua: string): string {
-  if (/windows/i.test(ua)) return 'Windows'
-  if (/mac os/i.test(ua)) return 'macOS'
-  if (/linux/i.test(ua)) return 'Linux'
-  if (/android/i.test(ua)) return 'Android'
-  if (/ios|iphone|ipad/i.test(ua)) return 'iOS'
-  return 'Other'
-}
-
 export async function getAnalyticsSummary(days: number = 7) {
   const startDate = new Date()
   startDate.setDate(startDate.getDate() - days)
   
   try {
-    const [totalVisits, uniqueVisitors, topPages, deviceStats, browserStats] = await Promise.all([
+    // Run queries in parallel
+    const [totalVisits, uniqueVisitorsRaw, topPages, deviceStats, browserStats] = await Promise.all([
       prisma.analytics.count({
         where: { timestamp: { gte: startDate } },
       }),
+      
       prisma.analytics.groupBy({
         by: ['ip'],
         where: { timestamp: { gte: startDate } },
       }),
+      
       prisma.analytics.groupBy({
         by: ['path'],
         where: { timestamp: { gte: startDate } },
@@ -562,27 +567,39 @@ export async function getAnalyticsSummary(days: number = 7) {
         orderBy: { _count: { path: 'desc' } },
         take: 10,
       }),
+      
       prisma.analytics.groupBy({
         by: ['device'],
-        where: { timestamp: { gte: startDate } },
+        where: { timestamp: { gte: startDate }, device: { not: null } },
         _count: { device: true },
       }),
+      
       prisma.analytics.groupBy({
         by: ['browser'],
-        where: { timestamp: { gte: startDate } },
+        where: { timestamp: { gte: startDate }, browser: { not: null } },
         _count: { browser: true },
       }),
     ])
     
     return {
-      totalVisits,
-      uniqueVisitors: uniqueVisitors.length,
-      topPages: topPages.map(p => ({ path: p.path, visits: p._count.path })),
-      deviceStats: deviceStats.map(d => ({ device: d.device, count: d._count.device })),
-      browserStats: browserStats.map(b => ({ browser: b.browser, count: b._count.browser })),
+      totalVisits: totalVisits || 0,
+      uniqueVisitors: uniqueVisitorsRaw ? uniqueVisitorsRaw.length : 0,
+      topPages: topPages.map(p => ({ 
+        path: p.path || '/', 
+        visits: p._count?.path || 0 
+      })),
+      deviceStats: deviceStats.map(d => ({ 
+        device: d.device || 'Unknown', 
+        count: d._count?.device || 0 
+      })),
+      browserStats: browserStats.map(b => ({ 
+        browser: b.browser || 'Unknown', 
+        count: b._count?.browser || 0 
+      })),
     }
   } catch (error) {
     console.error('Error fetching analytics summary:', error)
+    // Return empty structure on error to prevent UI crash
     return {
       totalVisits: 0,
       uniqueVisitors: 0,
@@ -594,78 +611,104 @@ export async function getAnalyticsSummary(days: number = 7) {
 }
 EOF
 
+# Create internal analytics recording endpoint (Bridge for Middleware)
+mkdir -p app/api/analytics/record
+cat > app/api/analytics/record/route.ts << 'EOF'
+import { NextRequest, NextResponse } from 'next/server'
+import { logAnalytics } from '@/lib/analytics'
+
+export const runtime = 'nodejs' 
+
+export async function POST(request: NextRequest) {
+  try {
+    const authHeader = request.headers.get('x-internal-secret')
+    // Simple security check
+    if (authHeader !== process.env.JWT_SECRET) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    }
+
+    const data = await request.json()
+    
+    // Log it
+    await logAnalytics(data)
+    
+    return NextResponse.json({ success: true })
+  } catch (error) {
+    console.error('Analytics Record Error:', error)
+    return NextResponse.json({ error: 'Internal Error' }, { status: 500 })
+  }
+}
+EOF
+
+
+# Create improved middleware with direct function call
 # Create improved middleware with direct function call
 cat > middleware.ts << 'EOF'
 import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
-import { logAnalytics } from '@/lib/analytics'
 
-// Helper to extract IP address
-function extractIP(request: NextRequest): string {
-  let ip = '127.0.0.1'
-  
-  try {
-    const forwardedFor = request.headers.get('x-forwarded-for')
-    const realIp = request.headers.get('x-real-ip')
-    
-    if (forwardedFor) {
-      ip = forwardedFor.split(',')[0].trim()
-    } else if (realIp) {
-      ip = realIp
-    }
-    
-    // Clean IPv6 prefix
-    if (ip.startsWith('::ffff:')) {
-      ip = ip.substring(7)
-    }
-  } catch (error) {
-    console.error('IP extraction error:', error)
-  }
-  
-  return ip
-}
-
-export async function middleware(request: NextRequest) {
-  const startTime = Date.now()
+export function middleware(request: NextRequest) {
   const response = NextResponse.next()
   
-  // Prevent caching
-  response.headers.set('Cache-Control', 'no-cache, no-store, must-revalidate')
-  response.headers.set('Pragma', 'no-cache')
-  response.headers.set('Expires', '0')
-  
-  
-  // Extract request data
-  const ip = extractIP(request)
-  const userAgent = request.headers.get('user-agent') || undefined
-  const method = request.method
-  const path = request.nextUrl.pathname
-  const referer = request.headers.get('referer') || undefined
+  const pathname = request.nextUrl.pathname
 
-   const timestamp = new Date().toISOString()
-   console.log(`[${timestamp}] Analytics: ${method} ${path} | IP: ${ip}`)  
+  // 1. Ignore internal API calls to prevent infinite loops
+  if (pathname.startsWith('/api/analytics/record')) {
+    return response
+  }
+
+  // 2. Ignore static files and Next.js internals
+  if (
+    pathname.startsWith('/_next') || 
+    pathname.includes('.') || 
+    pathname.startsWith('/favicon.ico')
+  ) {
+    return response
+  }
+
+  const startTime = Date.now()
   
-  // Log analytics in background (non-blocking)
-  // This direct function call is more efficient than HTTP request
-  logAnalytics({
+  // Prepare payload
+  // We grab IP from headers because request.ip is sometimes unreliable in proxies
+  const ip = request.headers.get('x-forwarded-for')?.split(',')[0] || 
+             request.headers.get('x-real-ip') || 
+             '127.0.0.1'
+             
+  const analyticsPayload = {
     ip,
-    userAgent,
-    method,
-    path,
-    statusCode: response.status,
+    userAgent: request.headers.get('user-agent'),
+    method: request.method,
+    path: pathname,
+    statusCode: 200, // We assume success for the middleware pass-through
     responseTime: Date.now() - startTime,
-    referer,
-  }).catch(error => {
-    // Errors logged but don't block response
-    console.error('[Analytics] Logging failed:', error.message)
+    referer: request.headers.get('referer'),
+  }
+
+  // 3. Send to internal API using LOCALHOST explicitly
+  // We use process.env.PORT or default to 3000
+  const port = process.env.PORT || 3000
+  const internalApiUrl = `http://127.0.0.1:${port}/api/analytics/record`
+
+  // Fire and forget - don't await
+  fetch(internalApiUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-internal-secret': process.env.JWT_SECRET || '',
+    },
+    body: JSON.stringify(analyticsPayload),
+  }).catch(err => {
+    // Log to server console so you can see it in: journalctl -u <your-app>
+    console.error(`[Middleware Error] Failed to record analytics: ${err.message}`)
   })
-  
+
   return response
 }
 
 export const config = {
   matcher: [
-    '/((?!api/|_next/static|_next/image|favicon.ico|.*\\..*).*)',
+    // Match everything except static files
+    '/((?!api/|_next/static|_next/image|favicon.ico).*)',
   ],
 }
 EOF
@@ -684,9 +727,11 @@ cat > app/api/health/route.ts << 'EOF'
 import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
 
+export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
+
 export async function GET() {
   try {
-    // Test database connection
     await prisma.$queryRaw`SELECT 1`
     
     return NextResponse.json({ 
@@ -712,6 +757,8 @@ cat > app/api/auth/login/route.ts << 'EOF'
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
 import { verifyPassword, generateToken } from '@/lib/auth'
+
+export const runtime = 'nodejs'
 
 export async function POST(request: NextRequest) {
   try {
@@ -740,7 +787,10 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ token, username: user.username })
   } catch (error) {
     console.error('Login error:', error)
-    return NextResponse.json({ error: 'Login failed' }, { status: 500 })
+    return NextResponse.json({ 
+      error: 'Login failed',
+      details: error instanceof Error ? error.message : 'Unknown error'
+    }, { status: 500 })
   }
 }
 EOF
@@ -751,8 +801,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import { verifyToken } from '@/lib/auth'
 import { getAnalyticsSummary } from '@/lib/analytics'
 
-// Force this route to always run dynamically (no caching)
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 export async function GET(request: NextRequest) {
   try {
@@ -767,10 +817,17 @@ export async function GET(request: NextRequest) {
     
     const summary = await getAnalyticsSummary(days)
     
-    return NextResponse.json(summary)
+    return NextResponse.json(summary, {
+      headers: {
+        'Cache-Control': 'no-store, max-age=0',
+      },
+    })
   } catch (error) {
     console.error('Analytics summary error:', error)
-    return NextResponse.json({ error: 'Failed to fetch analytics' }, { status: 500 })
+    return NextResponse.json({ 
+      error: 'Failed to fetch analytics',
+      details: error instanceof Error ? error.message : 'Unknown error'
+    }, { status: 500 })
   }
 }
 EOF
@@ -782,6 +839,7 @@ import { verifyToken } from '@/lib/auth'
 import { prisma } from '@/lib/db'
 
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 export async function GET(request: NextRequest) {
   try {
@@ -816,10 +874,17 @@ export async function GET(request: NextRequest) {
       total,
       page,
       pages: Math.ceil(total / limit),
+    }, {
+      headers: {
+        'Cache-Control': 'no-store, max-age=0',
+      },
     })
   } catch (error) {
     console.error('Detailed analytics error:', error)
-    return NextResponse.json({ error: 'Failed to fetch detailed analytics' }, { status: 500 })
+    return NextResponse.json({ 
+      error: 'Failed to fetch detailed analytics',
+      details: error instanceof Error ? error.message : 'Unknown error'
+    }, { status: 500 })
   }
 }
 EOF
@@ -831,6 +896,7 @@ import { verifyToken } from '@/lib/auth'
 import { prisma } from '@/lib/db'
 
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 export async function GET(request: NextRequest) {
   try {
@@ -846,7 +912,6 @@ export async function GET(request: NextRequest) {
     const startDate = new Date()
     startDate.setDate(startDate.getDate() - days)
     
-    // Get all traffic data
     const traffic = await prisma.analytics.findMany({
       where: { timestamp: { gte: startDate } },
       select: {
@@ -857,10 +922,17 @@ export async function GET(request: NextRequest) {
       orderBy: { timestamp: 'asc' },
     })
     
-    return NextResponse.json({ traffic })
+    return NextResponse.json({ traffic }, {
+      headers: {
+        'Cache-Control': 'no-store, max-age=0',
+      },
+    })
   } catch (error) {
     console.error('Traffic stats error:', error)
-    return NextResponse.json({ error: 'Failed to fetch traffic stats' }, { status: 500 })
+    return NextResponse.json({ 
+      error: 'Failed to fetch traffic stats',
+      details: error instanceof Error ? error.message : 'Unknown error'
+    }, { status: 500 })
   }
 }
 EOF
@@ -979,13 +1051,53 @@ export async function POST(request: NextRequest) {
 }
 EOF
 
+# Create test data endpoint for debugging
+mkdir -p app/api/analytics/test
+cat > app/api/analytics/test/route.ts << 'EOF'
+import { NextResponse } from 'next/server'
+import { prisma } from '@/lib/db'
 
+export const runtime = 'nodejs'
+
+export async function GET() {
+  try {
+    // Create test analytics data
+    await prisma.analytics.create({
+      data: {
+        ip: '127.0.0.1',
+        userAgent: 'Test Browser',
+        method: 'GET',
+        path: '/test',
+        statusCode: 200,
+        responseTime: 100,
+        device: 'Desktop',
+        browser: 'Chrome',
+        os: 'Linux',
+      },
+    })
+    
+    const count = await prisma.analytics.count()
+    
+    return NextResponse.json({ 
+      success: true,
+      message: 'Test data created',
+      totalRecords: count
+    })
+  } catch (error) {
+    return NextResponse.json({ 
+      error: error instanceof Error ? error.message : 'Unknown error'
+    }, { status: 500 })
+  }
+}
+EOF
+
+# Create admin dashboard
 # Create admin dashboard
 mkdir -p app/admin
 cat > app/admin/page.tsx << 'EOF'
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 
 interface AnalyticsSummary {
   totalVisits: number
@@ -1005,6 +1117,35 @@ export default function AdminDashboard() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
 
+  const fetchAnalytics = useCallback(async (authToken: string, daysParam: number) => {
+    setLoading(true)
+    setError('')
+    
+    try {
+      const res = await fetch(`/api/analytics/summary?days=${daysParam}`, {
+        headers: { 
+          Authorization: `Bearer ${authToken}`,
+          'Cache-Control': 'no-cache'
+        },
+      })
+
+      if (res.ok) {
+        const data = await res.json()
+        setAnalytics(data)
+      } else {
+        if (res.status === 401) {
+          handleLogout()
+        } else {
+          setError('Failed to load data')
+        }
+      }
+    } catch (err) {
+      setError('Connection error')
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
   useEffect(() => {
     const savedToken = localStorage.getItem('adminToken')
     if (savedToken) {
@@ -1012,7 +1153,7 @@ export default function AdminDashboard() {
       setIsLoggedIn(true)
       fetchAnalytics(savedToken, days)
     }
-  }, [])
+  }, [days, fetchAnalytics])
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -1050,42 +1191,11 @@ export default function AdminDashboard() {
     setAnalytics(null)
   }
 
-  const fetchAnalytics = async (authToken: string, daysParam: number) => {
-    setLoading(true)
-    setError('')
-    try {
-      const res = await fetch(`/api/analytics/summary?days=${daysParam}`, {
-        headers: { Authorization: `Bearer ${authToken}` },
-      })
-
-      if (res.ok) {
-        const data = await res.json()
-        setAnalytics(data)
-      } else {
-        setError('Failed to fetch analytics')
-        if (res.status === 401) {
-          handleLogout()
-        }
-      }
-    } catch (error) {
-      setError('Failed to fetch analytics')
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  const handleDaysChange = (newDays: number) => {
-    setDays(newDays)
-    if (token) {
-      fetchAnalytics(token, newDays)
-    }
-  }
-
   if (!isLoggedIn) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-100">
         <div className="bg-white p-8 rounded-lg shadow-md w-96">
-          <h1 className="text-2xl font-bold mb-6">Admin Login</h1>
+          <h1 className="text-2xl font-bold mb-6 text-gray-800">Admin Login</h1>
           {error && (
             <div className="mb-4 p-3 bg-red-100 text-red-700 rounded-md text-sm">
               {error}
@@ -1098,9 +1208,8 @@ export default function AdminDashboard() {
                 type="text"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900"
+                className="w-full px-3 py-2 border border-gray-300 rounded-md text-gray-900"
                 required
-                disabled={loading}
               />
             </div>
             <div className="mb-6">
@@ -1109,15 +1218,14 @@ export default function AdminDashboard() {
                 type="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900"
+                className="w-full px-3 py-2 border border-gray-300 rounded-md text-gray-900"
                 required
-                disabled={loading}
               />
             </div>
             <button
               type="submit"
               disabled={loading}
-              className="w-full bg-blue-600 text-white py-2 rounded-md hover:bg-blue-700 disabled:bg-gray-400 transition-colors"
+              className="w-full bg-blue-600 text-white py-2 rounded-md hover:bg-blue-700 transition-colors"
             >
               {loading ? 'Logging in...' : 'Login'}
             </button>
@@ -1140,100 +1248,65 @@ export default function AdminDashboard() {
           </button>
         </div>
 
-        {error && (
-          <div className="mb-4 p-3 bg-red-100 text-red-700 rounded-md">
-            {error}
-          </div>
-        )}
-
         <div className="mb-6 flex gap-2">
           {[7, 30, 90].map((d) => (
             <button
               key={d}
-              onClick={() => handleDaysChange(d)}
-              disabled={loading}
+              onClick={() => setDays(d)}
               className={`px-4 py-2 rounded-md transition-colors ${
-                days === d
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-white text-gray-700 hover:bg-gray-100'
-              } disabled:opacity-50`}
+                days === d ? 'bg-blue-600 text-white' : 'bg-white text-gray-700 hover:bg-gray-100'
+              }`}
             >
               Last {d} days
             </button>
           ))}
         </div>
 
-        {loading ? (
-          <div className="text-center py-12">
-            <p className="text-xl text-gray-600">Loading analytics...</p>
-          </div>
+        {loading && !analytics ? (
+          <div className="text-center py-12 text-gray-600">Loading analytics...</div>
         ) : analytics ? (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
             <div className="bg-white p-6 rounded-lg shadow">
-              <h2 className="text-lg font-semibold mb-2 text-gray-700">Total Visits</h2>
-              <p className="text-4xl font-bold text-blue-600">{analytics.totalVisits}</p>
+              <h2 className="text-sm font-medium text-gray-500 uppercase">Total Visits</h2>
+              <p className="mt-2 text-3xl font-semibold text-gray-900">{analytics.totalVisits}</p>
             </div>
 
             <div className="bg-white p-6 rounded-lg shadow">
-              <h2 className="text-lg font-semibold mb-2 text-gray-700">Unique Visitors</h2>
-              <p className="text-4xl font-bold text-green-600">{analytics.uniqueVisitors}</p>
+              <h2 className="text-sm font-medium text-gray-500 uppercase">Unique Visitors</h2>
+              <p className="mt-2 text-3xl font-semibold text-gray-900">{analytics.uniqueVisitors}</p>
             </div>
 
             <div className="bg-white p-6 rounded-lg shadow">
-              <h2 className="text-lg font-semibold mb-2 text-gray-700">Avg. Visits/Visitor</h2>
-              <p className="text-4xl font-bold text-purple-600">
+              <h2 className="text-sm font-medium text-gray-500 uppercase">Visits / User</h2>
+              <p className="mt-2 text-3xl font-semibold text-gray-900">
                 {analytics.uniqueVisitors > 0
                   ? (analytics.totalVisits / analytics.uniqueVisitors).toFixed(1)
-                  : 0}
+                  : '0.0'}
               </p>
             </div>
 
             <div className="bg-white p-6 rounded-lg shadow col-span-1 md:col-span-2">
-              <h2 className="text-lg font-semibold mb-4 text-gray-700">Top Pages</h2>
-              {analytics.topPages.length > 0 ? (
-                <div className="space-y-2">
-                  {analytics.topPages.map((page, i) => (
-                    <div key={i} className="flex justify-between items-center">
-                      <span className="text-sm truncate text-gray-600">{page.path}</span>
-                      <span className="text-sm font-semibold ml-2 text-gray-900">{page.visits}</span>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <p className="text-gray-500 text-sm">No data available</p>
-              )}
+              <h3 className="text-lg font-medium text-gray-900 mb-4">Top Pages</h3>
+              <div className="space-y-3">
+                {analytics.topPages.map((page, i) => (
+                  <div key={i} className="flex justify-between items-center border-b border-gray-100 last:border-0 pb-2 last:pb-0">
+                    <span className="text-sm text-gray-600 truncate">{page.path}</span>
+                    <span className="text-sm font-semibold text-gray-900">{page.visits}</span>
+                  </div>
+                ))}
+              </div>
             </div>
 
             <div className="bg-white p-6 rounded-lg shadow">
-              <h2 className="text-lg font-semibold mb-4 text-gray-700">Devices</h2>
-              {analytics.deviceStats.length > 0 ? (
-                <div className="space-y-2">
-                  {analytics.deviceStats.map((stat, i) => (
-                    <div key={i} className="flex justify-between items-center">
-                      <span className="text-sm text-gray-600">{stat.device}</span>
-                      <span className="text-sm font-semibold text-gray-900">{stat.count}</span>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <p className="text-gray-500 text-sm">No data available</p>
-              )}
-            </div>
-
-            <div className="bg-white p-6 rounded-lg shadow col-span-1 md:col-span-2 lg:col-span-3">
-              <h2 className="text-lg font-semibold mb-4 text-gray-700">Browsers</h2>
-              {analytics.browserStats.length > 0 ? (
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                  {analytics.browserStats.map((stat, i) => (
-                    <div key={i} className="text-center">
-                      <p className="text-2xl font-bold text-blue-600">{stat.count}</p>
-                      <p className="text-sm text-gray-600">{stat.browser}</p>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <p className="text-gray-500 text-sm">No data available</p>
-              )}
+              <h3 className="text-lg font-medium text-gray-900 mb-4">Device Types</h3>
+              <div className="space-y-3">
+                {analytics.deviceStats.map((stat, i) => (
+                  <div key={i} className="flex justify-between items-center">
+                    <span className="text-sm text-gray-600">{stat.device}</span>
+                    <span className="text-sm font-semibold text-gray-900">{stat.count}</span>
+                  </div>
+                ))}
+              </div>
             </div>
           </div>
         ) : null}
