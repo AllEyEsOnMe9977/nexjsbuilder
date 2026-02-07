@@ -646,15 +646,14 @@ export async function middleware(request: NextRequest) {
 export const config = {
   matcher: [
     /*
-     * Match all request paths except for the ones starting with:
-     * - api (API routes)
+     * Match all request paths except:
+     * - api (API routes - don't track API calls)
      * - _next/static (static files)
      * - _next/image (image optimization files)
-     * - admin (admin dashboard)
      * - favicon.ico (favicon file)
-     * - Any path containing a dot "." (excludes files like .png, .json, .xml, .txt)
+     * - Files with extensions (images, etc.)
      */
-    '/((?!api|_next/static|_next/image|admin|favicon.ico|.*\\..*).*)',
+    '/((?!api|_next/static|_next/image|favicon.ico).*)',
   ],
 }
 EOF
