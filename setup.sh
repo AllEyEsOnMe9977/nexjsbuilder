@@ -634,8 +634,6 @@ export async function middleware(request: NextRequest) {
   response.headers.set('Pragma', 'no-cache')
   response.headers.set('Expires', '0')
   
-   const timestamp = new Date().toISOString()
-   console.log(`[${timestamp}] Analytics: ${method} ${path} | IP: ${ip}`)  
   
   // Extract request data
   const ip = extractIP(request)
@@ -643,6 +641,9 @@ export async function middleware(request: NextRequest) {
   const method = request.method
   const path = request.nextUrl.pathname
   const referer = request.headers.get('referer') || undefined
+
+   const timestamp = new Date().toISOString()
+   console.log(`[${timestamp}] Analytics: ${method} ${path} | IP: ${ip}`)  
   
   // Log analytics in background (non-blocking)
   // This direct function call is more efficient than HTTP request
