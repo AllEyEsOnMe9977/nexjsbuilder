@@ -228,6 +228,17 @@ log_info "Updating system packages..."
 apt-get update
 apt-get upgrade -y
 
+# Create swap if not exists (prevents OOM during build)
+if ! swapon --show | grep -q '/swapfile'; then
+    log_info "Creating 2GB swap file to prevent build failures..."
+    fallocate -l 2G /swapfile
+    chmod 600 /swapfile
+    mkswap /swapfile
+    swapon /swapfile
+    echo '/swapfile none swap sw 0 0' >> /etc/fstab
+    log_info "Swap created successfully"
+fi
+
 # Install Node.js and npm if not installed
 if ! command -v node &> /dev/null; then
     log_info "Installing Node.js and npm..."
@@ -618,6 +629,14 @@ export async function middleware(request: NextRequest) {
   const startTime = Date.now()
   const response = NextResponse.next()
   
+  // Prevent caching
+  response.headers.set('Cache-Control', 'no-cache, no-store, must-revalidate')
+  response.headers.set('Pragma', 'no-cache')
+  response.headers.set('Expires', '0')
+  
+   const timestamp = new Date().toISOString()
+   console.log(`[${timestamp}] Analytics: ${method} ${path} | IP: ${ip}`)  
+  
   // Extract request data
   const ip = extractIP(request)
   const userAgent = request.headers.get('user-agent') || undefined
@@ -645,15 +664,7 @@ export async function middleware(request: NextRequest) {
 
 export const config = {
   matcher: [
-    /*
-     * Match all request paths except:
-     * - api (API routes - don't track API calls)
-     * - _next/static (static files)
-     * - _next/image (image optimization files)
-     * - favicon.ico (favicon file)
-     * - Files with extensions (images, etc.)
-     */
-    '/((?!api|_next/static|_next/image|favicon.ico).*)',
+    '/((?!api/|_next/static|_next/image|favicon.ico|.*\\..*).*)',
   ],
 }
 EOF
@@ -882,6 +893,91 @@ export async function POST(request: NextRequest) {
   }
 }
 EOF
+
+# Create client analytics component
+log_info "Creating client analytics tracking..."
+mkdir -p components
+
+cat > components/ClientAnalytics.tsx << 'EOF'
+'use client'
+
+import { useEffect } from 'react'
+import { usePathname } from 'next/navigation'
+
+export function ClientAnalytics() {
+  const pathname = usePathname()
+
+  useEffect(() => {
+    const sendAnalytics = async () => {
+      try {
+        await fetch('/api/analytics/track', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            path: pathname,
+            timestamp: new Date().toISOString(),
+          }),
+        })
+      } catch (error) {
+        console.error('[Client] Analytics error:', error)
+      }
+    }
+
+    sendAnalytics()
+  }, [pathname])
+
+  return null
+}
+EOF
+
+# Create client tracking API
+mkdir -p app/api/analytics/track
+cat > app/api/analytics/track/route.ts << 'EOF'
+import { NextRequest, NextResponse } from 'next/server'
+import { logAnalytics } from '@/lib/analytics'
+
+export async function POST(request: NextRequest) {
+  try {
+    const body = await request.json()
+    const { path } = body
+    
+    const forwardedFor = request.headers.get('x-forwarded-for')
+    const realIp = request.headers.get('x-real-ip')
+    let ip = '127.0.0.1'
+    
+    if (forwardedFor) {
+      ip = forwardedFor.split(',')[0].trim()
+    } else if (realIp) {
+      ip = realIp
+    }
+    
+    if (ip.startsWith('::ffff:')) {
+      ip = ip.substring(7)
+    }
+    
+    const userAgent = request.headers.get('user-agent') || undefined
+    const referer = request.headers.get('referer') || undefined
+    
+    await logAnalytics({
+      ip,
+      userAgent,
+      method: 'GET',
+      path: path || '/',
+      statusCode: 200,
+      responseTime: 0,
+      referer,
+    })
+    
+    return NextResponse.json({ success: true })
+  } catch (error) {
+    return NextResponse.json(
+      { success: false },
+      { status: 500 }
+    )
+  }
+}
+EOF
+
 
 # Create admin dashboard
 mkdir -p app/admin
@@ -1197,6 +1293,16 @@ export default function Home() {
 }
 EOF
 
+# Update layout to include ClientAnalytics
+log_info "Updating layout with analytics..."
+if [[ -f "app/layout.tsx" ]]; then
+    # Add import if not present
+    if ! grep -q "ClientAnalytics" app/layout.tsx; then
+        sed -i '/import.*globals\.css/a import { ClientAnalytics } from "@/components/ClientAnalytics";' app/layout.tsx
+        sed -i 's/<body\(.*\)>/<body\1>\n        <ClientAnalytics \/>/' app/layout.tsx
+    fi
+fi
+
 # Update next.config
 cat > next.config.ts << 'EOF'
 import type { NextConfig } from "next";
@@ -1255,6 +1361,7 @@ log_info "Installing production dependencies..."
 npm ci --production=false
 
 log_info "Building Next.js app..."
+export NODE_OPTIONS="--max-old-space-size=1536"
 npm run build
 
 # Create systemd service
