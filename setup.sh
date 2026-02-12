@@ -1400,35 +1400,19 @@ export default function Info() {
 }
 EOF
 
-# Create blank home page (Clean Template)
-cat > app/page.tsx << 'EOF'
-import Link from 'next/link'
+# Copy selected template to homepage
+log_info "Copying template to homepage..."
+cp "$TEMPLATE_PATH" app/page.tsx
+```
 
-export default function Home() {
-  return (
-    <main className="flex min-h-screen flex-col items-center justify-center p-24 bg-white">
-      <div className="max-w-5xl w-full text-center font-sans">
-        <h1 className="text-4xl font-bold mb-6 text-gray-900">
-          Welcome
-        </h1>
-        <p className="text-lg text-gray-600 mb-8">
-          This is your blank homepage template.
-        </p>
-        
-        {/* Helper link to find your tools - remove this div when ready */}
-        <div className="mt-12 pt-8 border-t border-gray-100">
-          <p className="text-sm text-gray-400">
-            Looking for the setup info?{' '}
-            <Link href="/info" className="text-blue-400 hover:underline">
-              Check /info
-            </Link>
-          </p>
-        </div>
-      </div>
-    </main>
-  )
-}
-EOF
+## 3. Create Template Directory Structure
+
+Create these files in the same directory as your setup script:
+```
+setup.sh
+templates/
+  ├── blank.tsx
+  └── shop.tsx
 
 # Update layout to include ClientAnalytics
 log_info "Updating layout with analytics..."
@@ -1492,6 +1476,41 @@ ADMINEOF
 
 cd $PROJECT_DIR && node create-admin.js "$ADMIN_PASSWORD" || log_error "Failed to create admin user"
 rm $PROJECT_DIR/create-admin.js
+
+# Template selection
+log_step "Template Selection"
+echo "Select homepage template:"
+echo "1) Blank (minimal welcome page)"
+echo "2) Shop (e-commerce template)"
+while true; do
+    read -p "Enter choice [1-2]: " TEMPLATE_CHOICE
+    case $TEMPLATE_CHOICE in
+        1)
+            TEMPLATE_FILE="blank.tsx"
+            log_info "Blank template selected"
+            break
+            ;;
+        2)
+            TEMPLATE_FILE="shop.tsx"
+            log_info "Shop template selected"
+            break
+            ;;
+        *)
+            log_warn "Invalid choice. Please enter 1 or 2."
+            ;;
+    esac
+done
+
+# Get the directory where this script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TEMPLATE_PATH="$SCRIPT_DIR/templates/$TEMPLATE_FILE"
+
+# Check if template file exists
+if [[ ! -f "$TEMPLATE_PATH" ]]; then
+    log_error "Template file not found: $TEMPLATE_PATH"
+fi
+
+log_info "Using template: $TEMPLATE_PATH"
 
 # Install dependencies and build
 log_info "Installing production dependencies..."
