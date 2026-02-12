@@ -188,6 +188,45 @@ else
     fi
 fi
 
+# ADD THIS ENTIRE SECTION HERE:
+# Template selection
+log_step "Template Selection"
+
+# Get the directory where this script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+echo "Select homepage template:"
+echo "1) Blank (minimal welcome page)"
+echo "2) Shop (e-commerce template)"
+while true; do
+    read -p "Enter choice [1-2]: " TEMPLATE_CHOICE
+    case $TEMPLATE_CHOICE in
+        1)
+            TEMPLATE_FILE="blank.tsx"
+            TEMPLATE_PATH="$SCRIPT_DIR/templates/$TEMPLATE_FILE"
+            log_info "Blank template selected"
+            break
+            ;;
+        2)
+            TEMPLATE_FILE="shop.tsx"
+            TEMPLATE_PATH="$SCRIPT_DIR/templates/$TEMPLATE_FILE"
+            log_info "Shop template selected"
+            break
+            ;;
+        *)
+            log_warn "Invalid choice. Please enter 1 or 2."
+            ;;
+    esac
+done
+
+# Check if template file exists
+if [[ ! -f "$TEMPLATE_PATH" ]]; then
+    log_error "Template file not found: $TEMPLATE_PATH"
+fi
+
+log_info "Using template: $TEMPLATE_PATH"
+# END OF ADDED SECTION
+
 PROJECT_DIR="/var/www/$PROJECT_NAME"
 NGINX_AVAILABLE="/etc/nginx/sites-available/$DOMAIN"
 NGINX_ENABLED="/etc/nginx/sites-enabled/$DOMAIN"
@@ -1400,19 +1439,10 @@ export default function Info() {
 }
 EOF
 
+
 # Copy selected template to homepage
 log_info "Copying template to homepage..."
 cp "$TEMPLATE_PATH" app/page.tsx
-```
-
-## 3. Create Template Directory Structure
-
-Create these files in the same directory as your setup script:
-```
-setup.sh
-templates/
-  ├── blank.tsx
-  └── shop.tsx
 
 # Update layout to include ClientAnalytics
 log_info "Updating layout with analytics..."
@@ -1479,6 +1509,7 @@ rm $PROJECT_DIR/create-admin.js
 
 
 # Template selection
+# Template selection
 log_step "Template Selection"
 # Get the directory where this script is located
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -1506,6 +1537,17 @@ while true; do
             ;;
     esac
 done
+
+# Check if template file exists
+if [[ ! -f "$TEMPLATE_PATH" ]]; then
+    log_error "Template file not found: $TEMPLATE_PATH"
+fi
+
+log_info "Using template: $TEMPLATE_PATH"
+
+# Get the directory where this script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TEMPLATE_PATH="$SCRIPT_DIR/templates/$TEMPLATE_FILE"
 
 # Check if template file exists
 if [[ ! -f "$TEMPLATE_PATH" ]]; then
