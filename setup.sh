@@ -1477,8 +1477,12 @@ ADMINEOF
 cd $PROJECT_DIR && node create-admin.js "$ADMIN_PASSWORD" || log_error "Failed to create admin user"
 rm $PROJECT_DIR/create-admin.js
 
+
 # Template selection
 log_step "Template Selection"
+# Get the directory where this script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 echo "Select homepage template:"
 echo "1) Blank (minimal welcome page)"
 echo "2) Shop (e-commerce template)"
@@ -1487,11 +1491,13 @@ while true; do
     case $TEMPLATE_CHOICE in
         1)
             TEMPLATE_FILE="blank.tsx"
+            TEMPLATE_PATH="$SCRIPT_DIR/templates/$TEMPLATE_FILE"
             log_info "Blank template selected"
             break
             ;;
         2)
             TEMPLATE_FILE="shop.tsx"
+            TEMPLATE_PATH="$SCRIPT_DIR/templates/$TEMPLATE_FILE"
             log_info "Shop template selected"
             break
             ;;
@@ -1500,6 +1506,13 @@ while true; do
             ;;
     esac
 done
+
+# Check if template file exists
+if [[ ! -f "$TEMPLATE_PATH" ]]; then
+    log_error "Template file not found: $TEMPLATE_PATH"
+fi
+
+log_info "Using template: $TEMPLATE_PATH"
 
 # Get the directory where this script is located
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
