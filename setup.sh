@@ -239,6 +239,21 @@ if ! swapon --show | grep -q '/swapfile'; then
     log_info "Swap created successfully"
 fi
 
+# Check available RAM
+TOTAL_RAM=$(free -m | awk '/^Mem:/{print $2}')
+if [[ $TOTAL_RAM -lt 2048 ]]; then
+    log_warn "Low RAM detected (${TOTAL_RAM}MB). Build may be slow or fail."
+    log_warn "Recommended: At least 2GB RAM. Current: ${TOTAL_RAM}MB"
+    read -p "Continue anyway? (yes/no): " CONFIRM_RAM
+    if [[ "$CONFIRM_RAM" != "yes" ]]; then
+        log_error "Setup cancelled due to insufficient RAM."
+    fi
+    # Reduce Node memory limit for low-RAM systems
+    export NODE_OPTIONS="--max-old-space-size=1024"
+else
+    export NODE_OPTIONS="--max-old-space-size=1536"
+fi
+
 # Install Node.js and npm if not installed
 if ! command -v node &> /dev/null; then
     log_info "Installing Node.js and npm..."
@@ -418,7 +433,7 @@ cat > .env << EOF
 DATABASE_URL="$FINAL_DB_URL"
 JWT_SECRET="$(generate_password)"
 ADMIN_USERNAME="$ADMIN_USER"
-ADMIN_PASSWORD="$ADMIN_PASSWORD"
+# REMOVE THIS LINE: ADMIN_PASSWORD="$ADMIN_PASSWORD"
 NEXT_PUBLIC_SITE_URL="https://$DOMAIN"
 NODE_ENV=production
 PORT=$APP_PORT
@@ -646,8 +661,11 @@ EOF
 cat > middleware.ts << 'EOF'
 import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
-
-export function middleware(request: NextRequest) {
+// Ensure we're using the same port as the app
+if (!process.env.PORT) {
+  console.warn('[Middleware] PORT env variable not set, using default 3000')
+}
+export async function middleware(request: NextRequest) {
   const response = NextResponse.next()
   
   const pathname = request.nextUrl.pathname
@@ -663,6 +681,14 @@ export function middleware(request: NextRequest) {
     pathname.includes('.') || 
     pathname.startsWith('/favicon.ico')
   ) {
+    return response
+  }
+
+  // ADD THIS NEW CHECK:
+  // 3. Ignore requests from localhost to prevent internal loops
+  const forwardedFor = request.headers.get('x-forwarded-for')
+  const realIp = request.headers.get('x-real-ip')
+  if (forwardedFor?.includes('127.0.0.1') || realIp === '127.0.0.1') {
     return response
   }
 
@@ -686,21 +712,26 @@ export function middleware(request: NextRequest) {
 
   // 3. Send to internal API using LOCALHOST explicitly
   // We use process.env.PORT or default to 3000
-  const port = process.env.PORT || 3000
-  const internalApiUrl = `http://127.0.0.1:${port}/api/analytics/record`
+  // Use explicit localhost with fallback
+  const port = process.env.PORT || '3000'
+  const internalApiUrl = `http://localhost:${port}/api/analytics/record`
 
   // Fire and forget - don't await
-  fetch(internalApiUrl, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-internal-secret': process.env.JWT_SECRET || '',
-    },
-    body: JSON.stringify(analyticsPayload),
-  }).catch(err => {
-    // Log to server console so you can see it in: journalctl -u <your-app>
-    console.error(`[Middleware Error] Failed to record analytics: ${err.message}`)
-  })
+  try {
+    fetch(internalApiUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-internal-secret': process.env.JWT_SECRET || '',
+      },
+      body: JSON.stringify(analyticsPayload),
+      signal: AbortSignal.timeout(5000), // ADD TIMEOUT
+    }).catch(err => {
+      console.error(`[Middleware] Analytics request failed: ${err.message}`)
+    })
+  } catch (err) {
+    // Silent fail - don't block user requests
+  }
 
   return response
 }
@@ -1435,7 +1466,7 @@ const prisma = new PrismaClient();
 
 async function createAdmin() {
   try {
-    const hash = await bcrypt.hash('$ADMIN_PASSWORD', 12);
+    const hash = await bcrypt.hash(process.argv[2], 12);
     const user = await prisma.user.upsert({
       where: { username: '$ADMIN_USER' },
       update: {
@@ -1459,7 +1490,7 @@ async function createAdmin() {
 createAdmin();
 ADMINEOF
 
-cd $PROJECT_DIR && node create-admin.js || log_error "Failed to create admin user"
+cd $PROJECT_DIR && node create-admin.js "$ADMIN_PASSWORD" || log_error "Failed to create admin user"
 rm $PROJECT_DIR/create-admin.js
 
 # Install dependencies and build
@@ -1609,12 +1640,13 @@ if [ "$SSL_SUCCESS" = true ]; then
     fi
     
     # Check and add rate limiting zones (check for project-specific zones)
-    if ! grep -q "zone=${PROJECT_NAME}_api" /etc/nginx/nginx.conf; then
-        log_info "Adding rate limiting zones to nginx.conf..."
-        sed -i '/http {/a \    # Rate limiting zones for '"$PROJECT_NAME"'\n    limit_req_zone $binary_remote_addr zone='"${PROJECT_NAME}"'_api:10m rate=10r/s;\n    limit_req_zone $binary_remote_addr zone='"${PROJECT_NAME}"'_general:10m rate=100r/s;\n' /etc/nginx/nginx.conf
-    else
-        log_info "Rate limiting zones already configured for this project"
-    fi
+    # Remove old zones for this project first
+    sed -i "/zone=${PROJECT_NAME}_api/d" /etc/nginx/nginx.conf
+    sed -i "/zone=${PROJECT_NAME}_general/d" /etc/nginx/nginx.conf
+
+    # Now add fresh zones
+    log_info "Adding rate limiting zones to nginx.conf..."
+    sed -i '/http {/a \    # Rate limiting zones for '"$PROJECT_NAME"'\n    limit_req_zone $binary_remote_addr zone='"${PROJECT_NAME}"'_api:10m rate=10r/s;\n    limit_req_zone $binary_remote_addr zone='"${PROJECT_NAME}"'_general:10m rate=100r/s;\n' /etc/nginx/nginx.conf
     
     # Create secure Nginx configuration
     log_info "Creating secure Nginx configuration..."
@@ -1797,21 +1829,18 @@ fi
 chmod +x "$PROJECT_DIR/backup.sh"
 
 # Create credentials file
-CREDS_FILE="$PROJECT_DIR/CREDENTIALS.txt"
-cat > $CREDS_FILE << EOF
-========================================
-SETUP COMPLETE - CREDENTIALS
-========================================
+echo "========================================"
+echo "SETUP COMPLETE"
+echo "========================================"
+echo ""
+echo "Domain: https://$DOMAIN"
+echo "Admin Dashboard: https://$DOMAIN/admin"
+echo ""
+echo "Admin Username: $ADMIN_USER"
+echo "Admin Password: $ADMIN_PASSWORD"
+echo ""
+echo "Database: $DB_TYPE"
 
-Domain: https://$DOMAIN
-Admin Dashboard: https://$DOMAIN/admin
-
-Admin Credentials:
-  Username: $ADMIN_USER
-  Password: $ADMIN_PASSWORD
-
-Database: $DB_TYPE
-EOF
 
 if [[ "$DB_TYPE" == "mariadb" ]]; then
     cat >> $CREDS_FILE << EOF
