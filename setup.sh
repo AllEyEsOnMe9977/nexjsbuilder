@@ -1317,8 +1317,10 @@ export default function AdminDashboard() {
 EOF
 
 # Create home page
-cat > app/page.tsx << 'EOF'
-export default function Home() {
+# Create info page (Moved original home content here)
+mkdir -p app/info
+cat > app/info/page.tsx << 'EOF'
+export default function Info() {
   return (
     <main className="flex min-h-screen flex-col items-center justify-center p-24 bg-gradient-to-br from-blue-50 to-indigo-100">
       <div className="z-10 max-w-5xl w-full items-center justify-center font-mono text-sm">
@@ -1359,6 +1361,36 @@ export default function Home() {
         <div className="mt-8 p-4 bg-white border border-gray-200 rounded-lg">
           <p className="text-sm text-gray-500">
             Server Time: {new Date().toISOString()}
+          </p>
+        </div>
+      </div>
+    </main>
+  )
+}
+EOF
+
+# Create blank home page (Clean Template)
+cat > app/page.tsx << 'EOF'
+import Link from 'next/link'
+
+export default function Home() {
+  return (
+    <main className="flex min-h-screen flex-col items-center justify-center p-24 bg-white">
+      <div className="max-w-5xl w-full text-center font-sans">
+        <h1 className="text-4xl font-bold mb-6 text-gray-900">
+          Welcome
+        </h1>
+        <p className="text-lg text-gray-600 mb-8">
+          This is your blank homepage template.
+        </p>
+        
+        {/* Helper link to find your tools - remove this div when ready */}
+        <div className="mt-12 pt-8 border-t border-gray-100">
+          <p className="text-sm text-gray-400">
+            Looking for the setup info?{' '}
+            <Link href="/info" className="text-blue-400 hover:underline">
+              Check /info
+            </Link>
           </p>
         </div>
       </div>
