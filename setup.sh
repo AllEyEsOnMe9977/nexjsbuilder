@@ -203,13 +203,25 @@ while true; do
     case $TEMPLATE_CHOICE in
         1)
             TEMPLATE_FILE="blank.tsx"
+            # Look for templates relative to the script location
             TEMPLATE_PATH="$SCRIPT_DIR/templates/$TEMPLATE_FILE"
+
+            # If not found, try current directory
+            if [[ ! -f "$TEMPLATE_PATH" ]]; then
+                TEMPLATE_PATH="$(pwd)/templates/$TEMPLATE_FILE"
+            fi
             log_info "Blank template selected"
             break
             ;;
         2)
             TEMPLATE_FILE="shop.tsx"
+            # Look for templates relative to the script location
             TEMPLATE_PATH="$SCRIPT_DIR/templates/$TEMPLATE_FILE"
+
+            # If not found, try current directory
+            if [[ ! -f "$TEMPLATE_PATH" ]]; then
+                TEMPLATE_PATH="$(pwd)/templates/$TEMPLATE_FILE"
+            fi
             log_info "Shop template selected"
             break
             ;;
@@ -1506,66 +1518,6 @@ ADMINEOF
 
 cd $PROJECT_DIR && node create-admin.js "$ADMIN_PASSWORD" || log_error "Failed to create admin user"
 rm $PROJECT_DIR/create-admin.js
-
-
-# Template selection
-# Template selection
-log_step "Template Selection"
-# Get the directory where this script is located
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-echo "Select homepage template:"
-echo "1) Blank (minimal welcome page)"
-echo "2) Shop (e-commerce template)"
-while true; do
-    read -p "Enter choice [1-2]: " TEMPLATE_CHOICE
-    case $TEMPLATE_CHOICE in
-        1)
-            TEMPLATE_FILE="blank.tsx"
-            TEMPLATE_PATH="$SCRIPT_DIR/templates/$TEMPLATE_FILE"
-            log_info "Blank template selected"
-            break
-            ;;
-        2)
-            TEMPLATE_FILE="shop.tsx"
-            TEMPLATE_PATH="$SCRIPT_DIR/templates/$TEMPLATE_FILE"
-            log_info "Shop template selected"
-            break
-            ;;
-        *)
-            log_warn "Invalid choice. Please enter 1 or 2."
-            ;;
-    esac
-done
-
-# Check if template file exists
-if [[ ! -f "$TEMPLATE_PATH" ]]; then
-    log_error "Template file not found: $TEMPLATE_PATH"
-fi
-
-log_info "Using template: $TEMPLATE_PATH"
-
-# Get the directory where this script is located
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TEMPLATE_PATH="$SCRIPT_DIR/templates/$TEMPLATE_FILE"
-
-# Check if template file exists
-if [[ ! -f "$TEMPLATE_PATH" ]]; then
-    log_error "Template file not found: $TEMPLATE_PATH"
-fi
-
-log_info "Using template: $TEMPLATE_PATH"
-
-# Get the directory where this script is located
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TEMPLATE_PATH="$SCRIPT_DIR/templates/$TEMPLATE_FILE"
-
-# Check if template file exists
-if [[ ! -f "$TEMPLATE_PATH" ]]; then
-    log_error "Template file not found: $TEMPLATE_PATH"
-fi
-
-log_info "Using template: $TEMPLATE_PATH"
 
 # Install dependencies and build
 log_info "Installing production dependencies..."
