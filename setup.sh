@@ -1699,7 +1699,7 @@ server {
     ssl_certificate /etc/letsencrypt/live/DOMAIN_PLACEHOLDER/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/DOMAIN_PLACEHOLDER/privkey.pem;
     ssl_session_timeout 1d;
-    ssl_session_cache shared:SSL:50m;
+    ssl_session_cache shared:SSL_PROJECT_NAME_PLACEHOLDER:50m;
     ssl_session_tickets off;
 
     # Modern SSL configuration
@@ -1797,16 +1797,30 @@ NGINXEOF
     sed -i "s/DOMAIN_PLACEHOLDER/$DOMAIN/g" $NGINX_AVAILABLE
     sed -i "s/APP_PORT_PLACEHOLDER/$APP_PORT/g" $NGINX_AVAILABLE
     sed -i "s/PROJECT_NAME_PLACEHOLDER/$PROJECT_NAME/g" $NGINX_AVAILABLE
+    sed -i "s/SSL_PROJECT_NAME_PLACEHOLDER/SSL_${PROJECT_NAME}/g" $NGINX_AVAILABLE
 
     # Test and reload nginx
     log_info "Testing final Nginx configuration..."
-    if nginx -t; then
-        log_info "Reloading Nginx with secure configuration..."
-        systemctl reload nginx
-        log_info "SSL configuration applied successfully"
-    else
-        log_error "Nginx configuration test failed after SSL setup"
-    fi
+        NGINX_TEST_OUTPUT=$(nginx -t 2>&1)
+        if echo "$NGINX_TEST_OUTPUT" | grep -q "conflicts with already declared size"; then
+            log_warn "SSL session cache zone name conflict detected. Renaming zone to project-specific name..."
+            # Rename the SSL session cache zone to avoid conflicts with other sites
+            sed -i "s/ssl_session_cache shared:SSL:/ssl_session_cache shared:SSL_${PROJECT_NAME}:/g" "$NGINX_AVAILABLE"
+            log_info "Retrying Nginx configuration test..."
+            if nginx -t; then
+                log_info "Reloading Nginx with secure configuration..."
+                systemctl reload nginx
+                log_info "SSL configuration applied successfully"
+            else
+                log_error "Nginx configuration test failed after SSL setup. Run 'nginx -t' for details."
+            fi
+        elif nginx -t 2>/dev/null; then
+            log_info "Reloading Nginx with secure configuration..."
+            systemctl reload nginx
+            log_info "SSL configuration applied successfully"
+        else
+            log_error "Nginx configuration test failed after SSL setup. Run 'nginx -t' for details."
+        fi
 else
     log_warn "Running on HTTP only due to SSL certificate failure"
 fi
