@@ -48,11 +48,11 @@ model Analytics {
   statusCode    Int
   responseTime  Int
   referer       String?  $([[ "$DB_TYPE" == "mariadb" ]] && echo "@db.Text" || echo "")
-  country       String?  @db.VarChar(100)
-  city          String?  @db.VarChar(100)
-  device        String?  @db.VarChar(50)
-  browser       String?  @db.VarChar(50)
-  os            String?  @db.VarChar(50)
+  country       String?  $([[ "$DB_TYPE" == "mariadb" ]] && echo "@db.VarChar(100)" || echo "")
+  city          String?  $([[ "$DB_TYPE" == "mariadb" ]] && echo "@db.VarChar(100)" || echo "")
+  device        String?  $([[ "$DB_TYPE" == "mariadb" ]] && echo "@db.VarChar(50)" || echo "")
+  browser       String?  $([[ "$DB_TYPE" == "mariadb" ]] && echo "@db.VarChar(50)" || echo "")
+  os            String?  $([[ "$DB_TYPE" == "mariadb" ]] && echo "@db.VarChar(50)" || echo "")
   bytesIn       Int      @default(0)
   bytesOut      Int      @default(0)
  
