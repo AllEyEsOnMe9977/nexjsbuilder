@@ -29,6 +29,14 @@ if [[ -d "$TEMPLATE_PATH/api" ]]; then
     cp -r "$TEMPLATE_PATH/api/." app/api/
 fi
 
+# Optional nested app routes (e.g. app/product/[id]/page.tsx, app/cart/page.tsx)
+# Template ships these under templates/<name>/routes/ mirroring the app/ tree,
+# excluding the homepage (already handled above via page.tsx) and api/ (handled above).
+if [[ -d "$TEMPLATE_PATH/routes" ]]; then
+    log_info "Copying template nested routes..."
+    cp -r "$TEMPLATE_PATH/routes/." app/
+fi
+
 # Optional template-specific env vars, appended to .env
 if [[ -f "$TEMPLATE_PATH/.env.template" ]]; then
     log_info "Appending template environment variables..."
