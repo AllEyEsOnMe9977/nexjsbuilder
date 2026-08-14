@@ -39,6 +39,7 @@ rm $PROJECT_DIR/create-admin.js
 
 # Install dependencies and build
 log_info "Installing production dependencies..."
+cd "$PROJECT_DIR" || log_error "Failed to enter project directory: $PROJECT_DIR"
 npm ci --production=false
 
 log_info "Building Next.js app..."
