@@ -19,12 +19,17 @@ npx --yes create-next-app@latest . --typescript --tailwind --app --no-src-dir --
 log_info "Installing additional dependencies..."
 npm install @prisma/client@5 bcryptjs jsonwebtoken
 # Install template-specific dependencies (declared in manifest.json)
-if [[ -f "$TEMPLATE_PATH/manifest.json" ]]; then
+if [[ -s "$TEMPLATE_PATH/manifest.json" ]]; then
     log_info "Reading template dependencies from manifest.json..."
-    TEMPLATE_DEPS=$(node -e "const m=require('$TEMPLATE_PATH/manifest.json'); console.log((m.dependencies||[]).join(' '))")
-    TEMPLATE_DEV_DEPS=$(node -e "const m=require('$TEMPLATE_PATH/manifest.json'); console.log((m.devDependencies||[]).join(' '))")
-    [[ -n "$TEMPLATE_DEPS" ]] && npm install $TEMPLATE_DEPS
-    [[ -n "$TEMPLATE_DEV_DEPS" ]] && npm install -D $TEMPLATE_DEV_DEPS
+    if TEMPLATE_DEPS=$(node -e "const m=require('$TEMPLATE_PATH/manifest.json'); console.log((m.dependencies||[]).join(' '))" 2>/tmp/manifest_err) && \
+       TEMPLATE_DEV_DEPS=$(node -e "const m=require('$TEMPLATE_PATH/manifest.json'); console.log((m.devDependencies||[]).join(' '))" 2>>/tmp/manifest_err); then
+        [[ -n "$TEMPLATE_DEPS" ]] && npm install $TEMPLATE_DEPS
+        [[ -n "$TEMPLATE_DEV_DEPS" ]] && npm install -D $TEMPLATE_DEV_DEPS
+    else
+        log_warn "Invalid manifest.json in template, skipping dependency install: $(cat /tmp/manifest_err)"
+    fi
+elif [[ -f "$TEMPLATE_PATH/manifest.json" ]]; then
+    log_warn "manifest.json exists but is empty, skipping dependency install."
 fi
 npm install -D prisma@5 @types/bcryptjs @types/jsonwebtoken
 
