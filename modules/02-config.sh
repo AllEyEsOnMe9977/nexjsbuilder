@@ -124,26 +124,12 @@ while true; do
     read -p "Enter choice [1-2]: " TEMPLATE_CHOICE
     case $TEMPLATE_CHOICE in
         1)
-            TEMPLATE_FILE="blank.tsx"
-            # Look for templates relative to the script location
-            TEMPLATE_PATH="$SCRIPT_DIR/templates/$TEMPLATE_FILE"
-
-            # If not found, try current directory
-            if [[ ! -f "$TEMPLATE_PATH" ]]; then
-                TEMPLATE_PATH="$(pwd)/templates/$TEMPLATE_FILE"
-            fi
+            TEMPLATE_NAME="blank"
             log_info "Blank template selected"
             break
             ;;
         2)
-            TEMPLATE_FILE="shop.tsx"
-            # Look for templates relative to the script location
-            TEMPLATE_PATH="$SCRIPT_DIR/templates/$TEMPLATE_FILE"
-
-            # If not found, try current directory
-            if [[ ! -f "$TEMPLATE_PATH" ]]; then
-                TEMPLATE_PATH="$(pwd)/templates/$TEMPLATE_FILE"
-            fi
+            TEMPLATE_NAME="shop"
             log_info "Shop template selected"
             break
             ;;
@@ -153,9 +139,20 @@ while true; do
     esac
 done
 
-# Check if template file exists
-if [[ ! -f "$TEMPLATE_PATH" ]]; then
-    log_error "Template file not found: $TEMPLATE_PATH"
+# Resolve template directory relative to the script location
+TEMPLATE_PATH="$SCRIPT_DIR/templates/$TEMPLATE_NAME"
+
+# If not found, try current directory
+if [[ ! -d "$TEMPLATE_PATH" ]]; then
+    TEMPLATE_PATH="$(pwd)/templates/$TEMPLATE_NAME"
+fi
+
+# Check if template directory exists and has the mandatory page.tsx
+if [[ ! -d "$TEMPLATE_PATH" ]]; then
+    log_error "Template directory not found: $TEMPLATE_PATH"
+fi
+if [[ ! -f "$TEMPLATE_PATH/page.tsx" ]]; then
+    log_error "Template directory is missing required page.tsx: $TEMPLATE_PATH"
 fi
 
 log_info "Using template: $TEMPLATE_PATH"

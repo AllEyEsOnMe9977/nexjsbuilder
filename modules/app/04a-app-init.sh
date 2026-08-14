@@ -18,6 +18,14 @@ npx --yes create-next-app@latest . --typescript --tailwind --app --no-src-dir --
 # Install additional dependencies
 log_info "Installing additional dependencies..."
 npm install @prisma/client@5 bcryptjs jsonwebtoken
+# Install template-specific dependencies (declared in manifest.json)
+if [[ -f "$TEMPLATE_PATH/manifest.json" ]]; then
+    log_info "Reading template dependencies from manifest.json..."
+    TEMPLATE_DEPS=$(node -e "const m=require('$TEMPLATE_PATH/manifest.json'); console.log((m.dependencies||[]).join(' '))")
+    TEMPLATE_DEV_DEPS=$(node -e "const m=require('$TEMPLATE_PATH/manifest.json'); console.log((m.devDependencies||[]).join(' '))")
+    [[ -n "$TEMPLATE_DEPS" ]] && npm install $TEMPLATE_DEPS
+    [[ -n "$TEMPLATE_DEV_DEPS" ]] && npm install -D $TEMPLATE_DEV_DEPS
+fi
 npm install -D prisma@5 @types/bcryptjs @types/jsonwebtoken
 
 # Initialize Prisma
@@ -80,3 +88,12 @@ model ApiStats {
   @@index([endpoint])
 }
 EOF
+
+# Merge template-specific Prisma models (if the template declares any)
+if [[ -f "$TEMPLATE_PATH/prisma/schema.partial.prisma" ]]; then
+    log_info "Merging Prisma models from template: $TEMPLATE_PATH"
+    echo "" >> prisma/schema.prisma
+    cat "$TEMPLATE_PATH/prisma/schema.partial.prisma" >> prisma/schema.prisma
+else
+    log_info "No template-specific Prisma models found, skipping merge."
+fi

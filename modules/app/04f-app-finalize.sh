@@ -7,7 +7,33 @@
 
 # Copy selected template to homepage
 log_info "Copying template to homepage..."
-cp "$TEMPLATE_PATH" app/page.tsx
+log_info "Applying template: $TEMPLATE_PATH"
+
+# page.tsx is mandatory for every template
+if [[ ! -f "$TEMPLATE_PATH/page.tsx" ]]; then
+    log_info "ERROR: Template missing required page.tsx at $TEMPLATE_PATH"
+    exit 1
+fi
+cp "$TEMPLATE_PATH/page.tsx" app/page.tsx
+
+# Optional template components (merged into project components/)
+if [[ -d "$TEMPLATE_PATH/components" ]]; then
+    log_info "Copying template components..."
+    cp -r "$TEMPLATE_PATH/components/." components/
+fi
+
+# Optional template API routes (merged into app/api/)
+if [[ -d "$TEMPLATE_PATH/api" ]]; then
+    log_info "Copying template API routes..."
+    mkdir -p app/api
+    cp -r "$TEMPLATE_PATH/api/." app/api/
+fi
+
+# Optional template-specific env vars, appended to .env
+if [[ -f "$TEMPLATE_PATH/.env.template" ]]; then
+    log_info "Appending template environment variables..."
+    cat "$TEMPLATE_PATH/.env.template" >> .env
+fi
 
 # Update layout to include ClientAnalytics
 log_info "Updating layout with analytics..."
