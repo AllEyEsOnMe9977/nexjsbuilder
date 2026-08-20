@@ -25,3 +25,8 @@ EOF
 log_info "Setting permissions..."
 chown -R www-data:www-data $PROJECT_DIR
 chmod -R 755 $PROJECT_DIR
+
+# The recursive chmod above makes everything world-readable, including .env
+# (DB password, JWT secret). Re-lock it to owner-only immediately after.
+log_info "Re-securing .env permissions..."
+chmod 600 "$PROJECT_DIR/.env"

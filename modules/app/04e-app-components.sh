@@ -56,51 +56,49 @@ interface AnalyticsSummary {
 }
 
 export default function AdminDashboard() {
-  const [token, setToken] = useState('')
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [isLoggedIn, setIsLoggedIn] = useState(false)
+  const [checkingSession, setCheckingSession] = useState(true)
   const [analytics, setAnalytics] = useState<AnalyticsSummary | null>(null)
   const [days, setDays] = useState(7)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
 
-  const fetchAnalytics = useCallback(async (authToken: string, daysParam: number) => {
+  // The JWT lives in an httpOnly cookie set by the server, so the browser
+  // attaches it automatically - there is no token in JS to manage here.
+  const fetchAnalytics = useCallback(async (daysParam: number) => {
     setLoading(true)
     setError('')
    
     try {
       const res = await fetch(`/api/analytics/summary?days=${daysParam}`, {
-        headers: { 
-          Authorization: `Bearer ${authToken}`,
-          'Cache-Control': 'no-cache'
-        },
+        credentials: 'include',
+        headers: { 'Cache-Control': 'no-cache' },
       })
 
       if (res.ok) {
         const data = await res.json()
         setAnalytics(data)
+        setIsLoggedIn(true)
+      } else if (res.status === 401) {
+        setIsLoggedIn(false)
+        setAnalytics(null)
       } else {
-        if (res.status === 401) {
-          handleLogout()
-        } else {
-          setError('Failed to load data')
-        }
+        setError('Failed to load data')
       }
     } catch (err) {
       setError('Connection error')
     } finally {
       setLoading(false)
+      setCheckingSession(false)
     }
   }, [])
 
+  // On mount, ask the server if we have a valid session cookie - this
+  // replaces the old "read token from localStorage" check.
   useEffect(() => {
-    const savedToken = localStorage.getItem('adminToken')
-    if (savedToken) {
-      setToken(savedToken)
-      setIsLoggedIn(true)
-      fetchAnalytics(savedToken, days)
-    }
+    fetchAnalytics(days)
   }, [days, fetchAnalytics])
 
   const handleLogin = async (e: React.FormEvent) => {
@@ -111,16 +109,14 @@ export default function AdminDashboard() {
     try {
       const res = await fetch('/api/auth/login', {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password }),
       })
 
       if (res.ok) {
-        const data = await res.json()
-        setToken(data.token)
-        localStorage.setItem('adminToken', data.token)
         setIsLoggedIn(true)
-        fetchAnalytics(data.token, days)
+        fetchAnalytics(days)
       } else {
         const data = await res.json()
         setError(data.error || 'Invalid credentials')
@@ -132,11 +128,23 @@ export default function AdminDashboard() {
     }
   }
 
-  const handleLogout = () => {
-    setToken('')
-    localStorage.removeItem('adminToken')
+  const handleLogout = async () => {
+    try {
+      // httpOnly cookies can't be cleared from JS - the server must do it.
+      await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' })
+    } catch (err) {
+      // Even if the request fails, drop client-side state below.
+    }
     setIsLoggedIn(false)
     setAnalytics(null)
+  }
+
+  if (checkingSession) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-100">
+        <p className="text-gray-600">Loading...</p>
+      </div>
+    )
   }
 
   if (!isLoggedIn) {

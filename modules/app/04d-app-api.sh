@@ -9,6 +9,7 @@
 # Create API routes directory structure
 log_info "Creating API directory structure..."
 mkdir -p app/api/auth/login
+mkdir -p app/api/auth/logout
 mkdir -p app/api/analytics/summary
 mkdir -p app/api/analytics/detailed
 mkdir -p app/api/analytics/traffic
@@ -77,7 +78,20 @@ export async function POST(request: NextRequest) {
    
     const token = generateToken(user.id, user.username)
    
-    return NextResponse.json({ token, username: user.username })
+    const response = NextResponse.json({ username: user.username })
+
+    // httpOnly: JS cannot read this cookie, so an XSS bug can't steal the
+    // admin session. secure: only sent over HTTPS. sameSite=strict: not
+    // sent on cross-site requests, which also covers CSRF for this cookie.
+    response.cookies.set('adminToken', token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict',
+      path: '/',
+      maxAge: 60 * 60 * 24 * 7, // 7 days, matches JWT expiresIn
+    })
+
+    return response
   } catch (error) {
     console.error('Login error:', error)
     return NextResponse.json({ 
@@ -85,6 +99,26 @@ export async function POST(request: NextRequest) {
       details: error instanceof Error ? error.message : 'Unknown error'
     }, { status: 500 })
   }
+}
+EOF
+
+# Logout API - clears the httpOnly cookie server-side. Client JS cannot
+# delete an httpOnly cookie directly, so a dedicated endpoint is required.
+cat > app/api/auth/logout/route.ts << 'EOF'
+import { NextResponse } from 'next/server'
+
+export const runtime = 'nodejs'
+
+export async function POST() {
+  const response = NextResponse.json({ success: true })
+  response.cookies.set('adminToken', '', {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'strict',
+    path: '/',
+    maxAge: 0,
+  })
+  return response
 }
 EOF
 
@@ -99,7 +133,7 @@ export const runtime = 'nodejs'
 
 export async function GET(request: NextRequest) {
   try {
-    const token = request.headers.get('authorization')?.replace('Bearer ', '')
+    const token = request.cookies.get('adminToken')?.value
    
     if (!token || !verifyToken(token)) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
@@ -136,7 +170,7 @@ export const runtime = 'nodejs'
 
 export async function GET(request: NextRequest) {
   try {
-    const token = request.headers.get('authorization')?.replace('Bearer ', '')
+    const token = request.cookies.get('adminToken')?.value
    
     if (!token || !verifyToken(token)) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
@@ -193,7 +227,7 @@ export const runtime = 'nodejs'
 
 export async function GET(request: NextRequest) {
   try {
-    const token = request.headers.get('authorization')?.replace('Bearer ', '')
+    const token = request.cookies.get('adminToken')?.value
    
     if (!token || !verifyToken(token)) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
@@ -270,6 +304,13 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
     const { path } = body
+
+    // Reject malformed or oversized input before it reaches the DB.
+    // This endpoint is public and unauthenticated by design (client-side
+    // page-view tracking), so it must not trust the payload shape or size.
+    if (typeof path !== 'string' || path.length > 500) {
+      return NextResponse.json({ success: false }, { status: 400 })
+    }
    
     const forwardedFor = request.headers.get('x-forwarded-for')
     const realIp = request.headers.get('x-real-ip')
@@ -308,42 +349,6 @@ export async function POST(request: NextRequest) {
 }
 EOF
 
-# Create test data endpoint for debugging
-mkdir -p app/api/analytics/test
-cat > app/api/analytics/test/route.ts << 'EOF'
-import { NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
-
-export const runtime = 'nodejs'
-
-export async function GET() {
-  try {
-    // Create test analytics data
-    await prisma.analytics.create({
-      data: {
-        ip: '127.0.0.1',
-        userAgent: 'Test Browser',
-        method: 'GET',
-        path: '/test',
-        statusCode: 200,
-        responseTime: 100,
-        device: 'Desktop',
-        browser: 'Chrome',
-        os: 'Linux',
-      },
-    })
-   
-    const count = await prisma.analytics.count()
-   
-    return NextResponse.json({ 
-      success: true,
-      message: 'Test data created',
-      totalRecords: count
-    })
-  } catch (error) {
-    return NextResponse.json({ 
-      error: error instanceof Error ? error.message : 'Unknown error'
-    }, { status: 500 })
-  }
-}
-EOF
+# NOTE: A "/api/analytics/test" debug endpoint was intentionally removed here.
+# It was an unauthenticated public GET that wrote a row to the DB on every
+# hit - a debug leftover with no place in a production deployment script.

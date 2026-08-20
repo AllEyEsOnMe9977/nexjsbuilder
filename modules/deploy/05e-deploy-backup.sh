@@ -14,16 +14,22 @@ DB_TYPE="DB_TYPE_PLACEHOLDER"
 BACKUP_DIR="/var/backups/$PROJECT_NAME"
 
 mkdir -p "$BACKUP_DIR"
+# Dumps contain full DB contents (including hashed passwords, PII) - owner-only.
+chmod 700 "$BACKUP_DIR"
 
 if [[ "$DB_TYPE" == "mariadb" ]]; then
     DB_USER="DB_USER_PLACEHOLDER"
     DB_PASSWORD="DB_PASSWORD_PLACEHOLDER"
     DB_NAME="DB_NAME_PLACEHOLDER"
-    mysqldump -u "$DB_USER" -p"$DB_PASSWORD" "$DB_NAME" | gzip > "$BACKUP_DIR/db_$(date +%Y%m%d_%H%M%S).sql.gz"
+    DUMP_FILE="$BACKUP_DIR/db_$(date +%Y%m%d_%H%M%S).sql.gz"
+    mysqldump -u "$DB_USER" -p"$DB_PASSWORD" "$DB_NAME" | gzip > "$DUMP_FILE"
+    chmod 600 "$DUMP_FILE"
     echo "MariaDB backup created"
 else
     if [[ -f "analytics.db" ]]; then
-        cp analytics.db "$BACKUP_DIR/db_$(date +%Y%m%d_%H%M%S).db"
+        DUMP_FILE="$BACKUP_DIR/db_$(date +%Y%m%d_%H%M%S).db"
+        cp analytics.db "$DUMP_FILE"
+        chmod 600 "$DUMP_FILE"
         echo "SQLite backup created"
     fi
 fi
@@ -41,4 +47,6 @@ if [[ "$DB_TYPE" == "mariadb" ]]; then
     sed -i "s/DB_PASSWORD_PLACEHOLDER/$DB_PASSWORD/g" "$PROJECT_DIR/backup.sh"
     sed -i "s/DB_NAME_PLACEHOLDER/$DB_NAME/g" "$PROJECT_DIR/backup.sh"
 fi
-chmod +x "$PROJECT_DIR/backup.sh"
+# backup.sh has the DB password embedded as plaintext (see sed replacements
+# above) — restrict to owner-only, not just executable-for-all.
+chmod 700 "$PROJECT_DIR/backup.sh"

@@ -117,7 +117,10 @@ if [[ "$DB_TYPE" == "mariadb" ]]; then
     mysql -e "CREATE DATABASE $DB_NAME CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
     mysql -e "DROP USER IF EXISTS '$DB_USER'@'localhost';"
     mysql -e "CREATE USER '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASSWORD';"
-    mysql -e "GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost';"
+    # CRUD-only privileges: the runtime app never needs DROP/ALTER/GRANT.
+    # This limits blast radius if the app is ever compromised (e.g. via a
+    # dependency vuln) - an attacker gets data access, not schema control.
+    mysql -e "GRANT SELECT, INSERT, UPDATE, DELETE ON $DB_NAME.* TO '$DB_USER'@'localhost';"
     mysql -e "FLUSH PRIVILEGES;"
     
     DB_URL="mysql://$DB_USER:$DB_PASSWORD@$DB_HOST:$DB_PORT/$DB_NAME"

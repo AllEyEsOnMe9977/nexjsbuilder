@@ -67,4 +67,19 @@ EOF
 # Run Prisma migrations
 log_info "Running database migrations..."
 npx prisma generate
+
+# The app DB user only has SELECT/INSERT/UPDATE/DELETE (see 03-system.sh) so
+# it can't create/alter tables. Grant DDL rights just for this push, then
+# revoke back down immediately - the running app never needs schema control.
+if [[ "$DB_TYPE" == "mariadb" ]]; then
+    mysql -e "GRANT CREATE, ALTER, DROP, INDEX, REFERENCES ON $DB_NAME.* TO '$DB_USER'@'localhost';"
+    mysql -e "FLUSH PRIVILEGES;"
+fi
+
 npx prisma db push --accept-data-loss
+
+if [[ "$DB_TYPE" == "mariadb" ]]; then
+    mysql -e "REVOKE CREATE, ALTER, DROP, INDEX, REFERENCES ON $DB_NAME.* FROM '$DB_USER'@'localhost';"
+    mysql -e "FLUSH PRIVILEGES;"
+    log_info "DDL privileges revoked - app DB user restricted to CRUD only."
+fi
