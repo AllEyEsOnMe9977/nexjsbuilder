@@ -62,12 +62,15 @@ cat > lib/auth.ts << 'EOF'
 import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
 
-const JWT_SECRET = process.env.JWT_SECRET
-if (!JWT_SECRET) {
-  // Never fall back to a hardcoded secret - that would let anyone forge
-  // valid admin tokens. Fail loudly at boot instead of silently at runtime.
-  throw new Error('JWT_SECRET is not set - refusing to start')
-}
+const JWT_SECRET: string = (() => {
+  const secret = process.env.JWT_SECRET
+  if (!secret) {
+    // Never fall back to a hardcoded secret - that would let anyone forge
+    // valid admin tokens. Fail loudly at boot instead of silently at runtime.
+    throw new Error('JWT_SECRET is not set - refusing to start')
+  }
+  return secret
+})()
 
 export async function hashPassword(password: string): Promise<string> {
   return bcrypt.hash(password, 12)
