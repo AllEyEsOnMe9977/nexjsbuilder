@@ -43,6 +43,20 @@ if [[ -f "$TEMPLATE_PATH/.env.template" ]]; then
     cat "$TEMPLATE_PATH/.env.template" >> .env
 fi
 
+# Optional template-specific global styles (CSS variables, @theme tokens,
+# custom animations for shadcn/magicui components), appended to globals.css
+if [[ -f "$TEMPLATE_PATH/globals.css.append" ]]; then
+    log_info "Appending template global styles..."
+    echo "" >> app/globals.css
+    cat "$TEMPLATE_PATH/globals.css.append" >> app/globals.css
+fi
+
+# Optional template-specific Tailwind config, replaces the generated one
+if [[ -f "$TEMPLATE_PATH/tailwind.config.ts" ]]; then
+    log_info "Applying template Tailwind config..."
+    cp "$TEMPLATE_PATH/tailwind.config.ts" tailwind.config.ts
+fi
+
 # Update layout to include ClientAnalytics
 log_info "Updating layout with analytics..."
 if [[ -f "app/layout.tsx" ]]; then
