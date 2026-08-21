@@ -1,5 +1,5 @@
 {
   "name": "shop",
-  "dependencies": [],
+  "dependencies": ["lucide-react"],
   "devDependencies": []
 }
