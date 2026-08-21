@@ -40,6 +40,17 @@ fi
 # Create lib directory structure
 mkdir -p lib
 
+
+# Create cn() helper - required by any shadcn/magicui component
+cat > lib/utils.ts << 'EOF'
+import { clsx, type ClassValue } from "clsx"
+import { twMerge } from "tailwind-merge"
+
+export function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs))
+}
+EOF
+
 # Create database utility
 cat > lib/db.ts << 'EOF'
 import { PrismaClient } from '@prisma/client'

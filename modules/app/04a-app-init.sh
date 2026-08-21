@@ -15,9 +15,43 @@ log_info "Creating Next.js application..."
 export NEXT_TELEMETRY_DISABLED=1
 npx --yes create-next-app@latest . --typescript --tailwind --app --no-src-dir --import-alias "@/*" --use-npm --yes
 
+# Create components.json so any template can ship pre-generated shadcn/magicui
+# components without each one needing its own copy of this config. Aliases
+# and paths here must match what create-next-app just scaffolded above.
+log_info "Creating components.json for shadcn/ui compatibility..."
+cat > components.json << 'EOF'
+{
+  "$schema": "https://ui.shadcn.com/schema.json",
+  "style": "base-nova",
+  "rsc": true,
+  "tsx": true,
+  "tailwind": {
+    "config": "",
+    "css": "app/globals.css",
+    "baseColor": "neutral",
+    "cssVariables": true,
+    "prefix": ""
+  },
+  "iconLibrary": "lucide",
+  "rtl": false,
+  "aliases": {
+    "components": "@/components",
+    "utils": "@/lib/utils",
+    "ui": "@/components/ui",
+    "lib": "@/lib",
+    "hooks": "@/hooks"
+  },
+  "menuColor": "default",
+  "menuAccent": "subtle",
+  "registries": {
+    "@magicui": "https://magicui.design/r/{name}"
+  }
+}
+EOF
+
 # Install additional dependencies
 log_info "Installing additional dependencies..."
-npm install @prisma/client@5 bcryptjs jsonwebtoken
+npm install @prisma/client@5 bcryptjs jsonwebtoken clsx tailwind-merge
 # Install template-specific dependencies (declared in manifest.json)
 if [[ -s "$TEMPLATE_PATH/manifest.json" ]]; then
     log_info "Reading template dependencies from manifest.json..."
