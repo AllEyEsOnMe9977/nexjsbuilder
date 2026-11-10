@@ -72,11 +72,21 @@ if [[ -f "app/layout.tsx" ]]; then
 fi
 
 # Update next.config.ts (standard server build for systemd `next start`)
+# Update next.config (preserve @tailwindcss/turbopack loader required by Next.js 16.4+)
 cat > next.config.ts << 'EOF'
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  output: "standalone",
   poweredByHeader: false,
+  turbopack: {
+    rules: {
+      "*.css": {
+        loaders: ["@tailwindcss/turbopack"],
+        as: "*.css",
+      },
+    },
+  },
 };
 
 export default nextConfig;

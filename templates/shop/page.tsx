@@ -1,14 +1,29 @@
+import Link from "next/link";
+import { ShoppingCart } from "lucide-react";
 import { prisma } from "@/lib/db";
 import { ProductCard } from "@/components/ProductCard";
 
-// Server component: fetch products at request time. Revalidate frequently
-// since this is a demo/test template, not a production caching strategy.
+// Force request-time rendering so build workers do not pre-render an empty DB snapshot
+export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-export default async function Home() {
-  const products = await prisma.product.findMany({
-    orderBy: { createdAt: "desc" },
-  });
+export default async function Home({
+  searchParams,
+}: {
+  searchParams: Promise<{ added?: string }>;
+}) {
+  const { added } = await searchParams;
+
+  const [products, cartAggregate] = await Promise.all([
+    prisma.product.findMany({
+      orderBy: { createdAt: "desc" },
+    }),
+    prisma.cartItem.aggregate({
+      _sum: { quantity: true },
+    }),
+  ]);
+
+  const cartCount = cartAggregate._sum.quantity ?? 0;
 
   return (
     <main className="min-h-screen bg-gray-50">
@@ -17,12 +32,27 @@ export default async function Home() {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
           <div className="flex justify-between items-center">
             <h1 className="text-2xl font-bold text-gray-900">Shop</h1>
-            <nav className="flex gap-6">
-              <a href="/" className="text-gray-600 hover:text-gray-900">Products</a>
+            <nav className="flex items-center gap-6">
+              <Link href="/" className="text-gray-600 hover:text-gray-900">
+                Products
+              </Link>
+              <a
+                href="/api/cart"
+                className="flex items-center gap-1.5 text-gray-700 hover:text-gray-900 font-medium"
+              >
+                <ShoppingCart size={18} />
+                <span>Cart ({cartCount})</span>
+              </a>
             </nav>
           </div>
         </div>
       </header>
+
+      {added === "1" && (
+        <div className="bg-green-50 border-b border-green-200 text-green-800 px-4 py-3 text-center text-sm font-medium">
+          Item added to cart!
+        </div>
+      )}
 
       {/* Hero */}
       <section className="bg-gradient-to-r from-blue-600 to-indigo-700 text-white py-20">

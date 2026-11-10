@@ -1,5 +1,8 @@
+import Link from "next/link";
 import { prisma } from "@/lib/db";
 import { notFound } from "next/navigation";
+
+export const dynamic = "force-dynamic";
 
 export default async function ProductPage({
   params,
@@ -16,11 +19,19 @@ export default async function ProductPage({
   return (
     <main className="min-h-screen bg-gray-50 py-16">
       <div className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8">
-        <a href="/" className="text-blue-600 hover:underline text-sm">
+        <Link href="/" className="text-blue-600 hover:underline text-sm">
           &larr; Back to products
-        </a>
+        </Link>
         <div className="bg-white rounded-lg shadow-md overflow-hidden mt-4">
-          <div className="h-64 bg-gray-200" />
+          {product.imageUrl ? (
+            <img
+              src={product.imageUrl}
+              alt={product.name}
+              className="h-64 w-full object-cover bg-gray-100"
+            />
+          ) : (
+            <div className="h-64 bg-gray-200" />
+          )}
           <div className="p-6">
             <h1 className="text-3xl font-bold text-gray-900 mb-2">
               {product.name}

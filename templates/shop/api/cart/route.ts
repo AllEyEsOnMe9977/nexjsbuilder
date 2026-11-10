@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 
+export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
+
 export async function GET() {
   try {
     const items = await prisma.cartItem.findMany({
@@ -21,10 +24,10 @@ export async function POST(req: NextRequest) {
 
     if (contentType.includes("application/json")) {
       const body = await req.json();
-      productId = body.productId;
+      productId = typeof body?.productId === "string" ? body.productId.trim() : null;
     } else {
       const form = await req.formData();
-      productId = form.get("productId")?.toString() ?? null;
+      productId = form.get("productId")?.toString().trim() ?? null;
     }
 
     if (!productId) {
@@ -46,8 +49,17 @@ export async function POST(req: NextRequest) {
           data: { productId, quantity: 1 },
         });
 
+    console.log(`[cart:POST] added product ${productId} to cart (qty: ${cartItem.quantity})`);
+
     if (!contentType.includes("application/json")) {
-      const baseUrl = process.env.NEXT_PUBLIC_SITE_URL || req.nextUrl.origin;
+      // Prefer Nginx forwarded headers so both HTTP-only and HTTPS setups redirect accurately
+      const forwardedProto = req.headers.get("x-forwarded-proto");
+      const forwardedHost = req.headers.get("x-forwarded-host") || req.headers.get("host");
+      const baseUrl =
+        forwardedProto && forwardedHost
+          ? `${forwardedProto}://${forwardedHost}`
+          : process.env.NEXT_PUBLIC_SITE_URL || req.nextUrl.origin;
+
       return NextResponse.redirect(new URL("/?added=1", baseUrl), { status: 303 });
     }
 
