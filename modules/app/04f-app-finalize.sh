@@ -60,19 +60,23 @@ fi
 # Update layout to include ClientAnalytics
 log_info "Updating layout with analytics..."
 if [[ -f "app/layout.tsx" ]]; then
-    # Add import if not present
-    if ! grep -q "ClientAnalytics" app/layout.tsx; then
-        sed -i '/import.*globals\.css/a import { ClientAnalytics } from "@/components/ClientAnalytics";' app/layout.tsx
-        sed -i 's/<body\(.*\)>/<body\1>\n        <ClientAnalytics \/>/' app/layout.tsx
-    fi
+    node -e '
+      const fs = require("fs");
+      let content = fs.readFileSync("app/layout.tsx", "utf8");
+      if (!content.includes("ClientAnalytics")) {
+        content = "import { ClientAnalytics } from \"@/components/ClientAnalytics\";\n" + content;
+        content = content.replace(/(<body[^>]*>)/s, "$1\n        <ClientAnalytics />");
+        fs.writeFileSync("app/layout.tsx", content);
+      }
+    '
 fi
 
-# Update next.config
+# Update next.config.ts (standard server build for systemd `next start`)
 cat > next.config.ts << 'EOF'
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  output: 'standalone',
+  poweredByHeader: false,
 };
 
 export default nextConfig;

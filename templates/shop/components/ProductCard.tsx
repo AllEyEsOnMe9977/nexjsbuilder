@@ -1,20 +1,27 @@
 import Link from "next/link";
 import { ShoppingCart } from "lucide-react";
 
-// Minimal shape used by the card — matches the Prisma Product model fields
-// that the homepage and product API actually select.
 export type ProductCardData = {
   id: string;
   name: string;
   description: string | null;
   price: number;
+  imageUrl?: string | null;
 };
 
 export function ProductCard({ product }: { product: ProductCardData }) {
   return (
     <div className="bg-white rounded-lg shadow-md overflow-hidden hover:shadow-lg transition-shadow">
       <Link href={`/product/${product.id}`}>
-        <div className="h-48 bg-gray-200" />
+        {product.imageUrl ? (
+          <img
+            src={product.imageUrl}
+            alt={product.name}
+            className="h-48 w-full object-cover bg-gray-100"
+          />
+        ) : (
+          <div className="h-48 bg-gray-200" />
+        )}
         <div className="p-4">
           <h4 className="font-semibold text-gray-900 mb-1">{product.name}</h4>
           <p className="text-gray-600 text-sm mb-4 line-clamp-2">

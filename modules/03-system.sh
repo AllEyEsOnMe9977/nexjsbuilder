@@ -65,8 +65,8 @@ else
 fi
 
 # Install Node.js and npm if not installed
-if ! command -v node &> /dev/null; then
-    log_info "Installing Node.js and npm..."
+if ! command -v node &> /dev/null || [[ $(node -v | cut -d. -f1 | tr -d 'v') -lt 20 ]]; then
+    log_info "Installing Node.js 20 LTS and npm..."
     curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
     apt-get install -y nodejs
 else
@@ -125,7 +125,10 @@ if [[ "$DB_TYPE" == "mariadb" ]]; then
     
     DB_URL="mysql://$DB_USER:$DB_PASSWORD@$DB_HOST:$DB_PORT/$DB_NAME"
 else
-    log_info "SQLite will be used (no installation needed)"
+    log_info "SQLite selected (installing sqlite3 CLI if needed)..."
+    if ! command -v sqlite3 &> /dev/null; then
+        apt-get install -y sqlite3
+    fi
     DB_URL="file:./analytics.db"
 fi
 

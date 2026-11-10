@@ -1,13 +1,12 @@
 // Shop template models — appended to the base schema by 04a-app-init.sh
 
 model Product {
-  id          String   @id @default(cuid())
+  id          String     @id @default(cuid())
   name        String
   description String?
   price       Float
   imageUrl    String?
-  createdAt   DateTime @default(now())
-
+  createdAt   DateTime   @default(now())
   cartItems   CartItem[]
 }
 
@@ -16,8 +15,7 @@ model CartItem {
   productId String
   quantity  Int      @default(1)
   createdAt DateTime @default(now())
-
-  product   Product  @relation(fields: [productId], references: [id])
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
 
   @@index([productId])
 }

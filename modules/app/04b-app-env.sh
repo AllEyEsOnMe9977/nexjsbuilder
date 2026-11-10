@@ -116,24 +116,25 @@ interface AnalyticsData {
   statusCode: number
   responseTime: number
   referer?: string
+  bytesIn?: number
+  bytesOut?: number
 }
 
-// Helper to parse User Agent (Basic)
 function parseUserAgent(ua: string) {
   const device = /mobile/i.test(ua) ? 'Mobile' : /tablet|ipad/i.test(ua) ? 'Tablet' : 'Desktop'
- 
+
   let browser = 'Other'
-  if (/chrome/i.test(ua) && !/edge|edg/i.test(ua)) browser = 'Chrome'
-  else if (/firefox/i.test(ua)) browser = 'Firefox'
-  else if (/safari/i.test(ua) && !/chrome/i.test(ua)) browser = 'Safari'
-  else if (/edge|edg/i.test(ua)) browser = 'Edge'
+  if (/edg/i.test(ua)) browser = 'Edge'
+  else if (/chrome|crios/i.test(ua)) browser = 'Chrome'
+  else if (/firefox|fxios/i.test(ua)) browser = 'Firefox'
+  else if (/safari/i.test(ua)) browser = 'Safari'
 
   let os = 'Other'
   if (/windows/i.test(ua)) os = 'Windows'
-  else if (/mac os/i.test(ua)) os = 'macOS'
-  else if (/linux/i.test(ua)) os = 'Linux'
   else if (/android/i.test(ua)) os = 'Android'
   else if (/ios|iphone|ipad/i.test(ua)) os = 'iOS'
+  else if (/mac os/i.test(ua)) os = 'macOS'
+  else if (/linux/i.test(ua)) os = 'Linux'
 
   return { device, browser, os }
 }
@@ -141,7 +142,7 @@ function parseUserAgent(ua: string) {
 export async function logAnalytics(data: AnalyticsData) {
   try {
     const { device, browser, os } = parseUserAgent(data.userAgent || '')
-   
+
     await prisma.analytics.create({
       data: {
         ip: data.ip,
@@ -154,8 +155,8 @@ export async function logAnalytics(data: AnalyticsData) {
         device,
         browser,
         os,
-        bytesIn: 0,
-        bytesOut: 0,
+        bytesIn: data.bytesIn ?? 0,
+        bytesOut: data.bytesOut ?? 0,
       },
     })
   } catch (error) {
@@ -164,21 +165,18 @@ export async function logAnalytics(data: AnalyticsData) {
 }
 
 export async function getAnalyticsSummary(days: number = 7) {
+  const safeDays = Number.isFinite(days) && days > 0 ? Math.min(days, 365) : 7
   const startDate = new Date()
-  startDate.setDate(startDate.getDate() - days)
- 
+  startDate.setDate(startDate.getDate() - safeDays)
+
   try {
-    // Run queries in parallel
-    const [totalVisits, uniqueVisitorsRaw, topPages, deviceStats, browserStats] = await Promise.all([
+    const [totalVisits, uniqueVisitorsResult, topPages, deviceStats, browserStats] = await Promise.all([
       prisma.analytics.count({
         where: { timestamp: { gte: startDate } },
       }),
-     
-      prisma.analytics.groupBy({
-        by: ['ip'],
-        where: { timestamp: { gte: startDate } },
-      }),
-     
+      prisma.$queryRaw<[{ count: bigint | number }]>`
+        SELECT COUNT(DISTINCT ip) as count FROM Analytics WHERE timestamp >= ${startDate}
+      `,
       prisma.analytics.groupBy({
         by: ['path'],
         where: { timestamp: { gte: startDate } },
@@ -186,39 +184,38 @@ export async function getAnalyticsSummary(days: number = 7) {
         orderBy: { _count: { path: 'desc' } },
         take: 10,
       }),
-     
       prisma.analytics.groupBy({
         by: ['device'],
         where: { timestamp: { gte: startDate }, device: { not: null } },
         _count: { device: true },
       }),
-     
       prisma.analytics.groupBy({
         by: ['browser'],
         where: { timestamp: { gte: startDate }, browser: { not: null } },
         _count: { browser: true },
       }),
     ])
-   
+
+    const uniqueVisitors = Number(uniqueVisitorsResult?.[0]?.count ?? 0)
+
     return {
       totalVisits: totalVisits || 0,
-      uniqueVisitors: uniqueVisitorsRaw ? uniqueVisitorsRaw.length : 0,
-      topPages: topPages.map(p => ({ 
-        path: p.path || '/', 
-        visits: p._count?.path || 0 
+      uniqueVisitors,
+      topPages: topPages.map(p => ({
+        path: p.path || '/',
+        visits: p._count?.path || 0,
       })),
-      deviceStats: deviceStats.map(d => ({ 
-        device: d.device || 'Unknown', 
-        count: d._count?.device || 0 
+      deviceStats: deviceStats.map(d => ({
+        device: d.device || 'Unknown',
+        count: d._count?.device || 0,
       })),
-      browserStats: browserStats.map(b => ({ 
-        browser: b.browser || 'Unknown', 
-        count: b._count?.browser || 0 
+      browserStats: browserStats.map(b => ({
+        browser: b.browser || 'Unknown',
+        count: b._count?.browser || 0,
       })),
     }
   } catch (error) {
     console.error('Error fetching analytics summary:', error)
-    // Return empty structure on error to prevent UI crash
     return {
       totalVisits: 0,
       uniqueVisitors: 0,

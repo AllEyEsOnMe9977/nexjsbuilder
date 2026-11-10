@@ -23,6 +23,8 @@ fi
 
 log_step "Project Selection"
 read -p "Enter the project name to uninstall (e.g., nextjs-app): " PROJECT_NAME
+PROJECT_NAME=$(echo "$PROJECT_NAME" | tr '[:upper:]' '[:lower:]' | tr '_ ' '--' | sed 's/[^a-z0-9-]//g;s/^-*//;s/-*$//')
+ZONE_PREFIX="${PROJECT_NAME//-/_}"
 if [[ -z "$PROJECT_NAME" ]]; then
     log_error "Project name cannot be empty."
 fi
@@ -71,6 +73,9 @@ fi
 
 # Clean up injected rate limit zones from the main nginx.conf
 log_info "Cleaning up rate limiting zones from global Nginx config..."
+sed -i "/# Rate limiting zones for ${PROJECT_NAME}/d" /etc/nginx/nginx.conf
+sed -i "/zone=${ZONE_PREFIX}_api/d" /etc/nginx/nginx.conf
+sed -i "/zone=${ZONE_PREFIX}_general/d" /etc/nginx/nginx.conf
 sed -i "/zone=${PROJECT_NAME}_api/d" /etc/nginx/nginx.conf
 sed -i "/zone=${PROJECT_NAME}_general/d" /etc/nginx/nginx.conf
 

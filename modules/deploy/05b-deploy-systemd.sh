@@ -1,8 +1,7 @@
 #!/bin/bash
 
-# Create systemd service
 log_info "Creating systemd service..."
-cat > /etc/systemd/system/$PROJECT_NAME.service << EOF
+cat > "/etc/systemd/system/$PROJECT_NAME.service" << EOF
 [Unit]
 Description=Next.js App - $PROJECT_NAME
 After=network.target
@@ -11,7 +10,7 @@ After=network.target
 Type=simple
 User=www-data
 WorkingDirectory=$PROJECT_DIR
-ExecStart=/usr/bin/npm start
+ExecStart=$PROJECT_DIR/node_modules/.bin/next start -p $APP_PORT
 Restart=always
 RestartSec=10
 Environment=NODE_ENV=production
@@ -21,12 +20,9 @@ Environment=PORT=$APP_PORT
 WantedBy=multi-user.target
 EOF
 
-# Set permissions
 log_info "Setting permissions..."
-chown -R www-data:www-data $PROJECT_DIR
-chmod -R 755 $PROJECT_DIR
+chown -R www-data:www-data "$PROJECT_DIR"
+chmod -R 755 "$PROJECT_DIR"
 
-# The recursive chmod above makes everything world-readable, including .env
-# (DB password, JWT secret). Re-lock it to owner-only immediately after.
 log_info "Re-securing .env permissions..."
 chmod 600 "$PROJECT_DIR/.env"
