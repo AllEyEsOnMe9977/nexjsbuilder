@@ -1,0 +1,19 @@
+# Packages from a different stack. A template that needs any of these is NOT a
+# Next.js template and is refused by import-template.sh and by setup.sh.
+# One entry per line. A trailing * means "any package starting with this".
+vite
+vite-plugin-*
+@vitejs/*
+@tailwindcss/vite
+express
+esbuild
+tsx
+ts-node
+nodemon
+react-scripts
+webpack
+webpack-cli
+parcel
+rollup
+@remix-run/*
+gatsby

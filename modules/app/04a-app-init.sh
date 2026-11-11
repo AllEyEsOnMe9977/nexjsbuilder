@@ -5,6 +5,16 @@
 # log_info() to be defined by earlier modules (01-utils.sh, 02-config.sh).
 # =============================================================================
 
+# Guard: refuse a template whose manifest would install a different stack (Vite,
+# Express...) or override base packages. Runs BEFORE anything is created so a bad
+# template leaves no half-built project behind.
+if [[ -f "$TEMPLATE_PATH/manifest.json" ]]; then
+    log_info "Validating template manifest..."
+    if ! node "$SCRIPT_DIR/check-packages.js" "$SCRIPT_DIR/blocked-packages.txt" "$TEMPLATE_PATH/manifest.json" --reserved; then
+        log_error "Template '$TEMPLATE_NAME' failed validation. Nothing was created or installed."
+    fi
+fi
+
 # Create project directory
 log_info "Creating project directory at $PROJECT_DIR..."
 mkdir -p $PROJECT_DIR

@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 450" fill="none">
+  <rect width="800" height="450" rx="16" fill="url(#ai-bg)"/>
+  <circle cx="420" cy="220" r="160" fill="#8B5CF6" opacity="0.25" filter="blur(60px)"/>
+  <g transform="translate(180, 85)">
+    <rect width="440" height="280" rx="16" fill="#110E1B" stroke="#6D28D9" stroke-opacity="0.4" stroke-width="1.5"/>
+    <path d="M120 70L220 140L320 80M120 210L220 140L320 200" stroke="#A78BFA" stroke-width="2" stroke-opacity="0.5"/>
+    <circle cx="120" cy="70" r="12" fill="#8B5CF6"/>
+    <circle cx="320" cy="80" r="12" fill="#A855F7"/>
+    <circle cx="220" cy="140" r="18" fill="#C084FC" stroke="#FFFFFF" stroke-width="2"/>
+    <circle cx="120" cy="210" r="12" fill="#6366F1"/>
+    <circle cx="320" cy="200" r="12" fill="#EC4899"/>
+    <rect x="70" y="240" width="300" height="10" rx="5" fill="#DDD6FE" fill-opacity="0.4"/>
+  </g>
+  <defs>
+    <linearGradient id="ai-bg" x1="0" y1="0" x2="800" y2="450" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1E1B4B"/>
+      <stop offset="0.6" stop-color="#140D27"/>
+      <stop offset="1" stop-color="#03020A"/>
+    </linearGradient>
+  </defs>
+</svg>

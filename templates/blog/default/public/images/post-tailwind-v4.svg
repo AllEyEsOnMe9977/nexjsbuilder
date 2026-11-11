@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 450" fill="none">
+  <rect width="800" height="450" rx="16" fill="url(#tw-bg)"/>
+  <circle cx="400" cy="225" r="150" fill="#06B6D4" opacity="0.2" filter="blur(70px)"/>
+  <g transform="translate(150, 95)">
+    <rect width="500" height="260" rx="16" fill="#0A0F1D" stroke="#0284C7" stroke-opacity="0.4" stroke-width="1.5"/>
+    <path d="M40 70C60 40 90 40 110 70C130 100 160 100 180 70C200 40 230 40 250 70" stroke="#38BDF8" stroke-width="4" stroke-linecap="round" fill="none"/>
+    <rect x="40" y="110" width="200" height="14" rx="4" fill="#38BDF8"/>
+    <rect x="40" y="136" width="320" height="8" rx="4" fill="#94A3B8"/>
+    <rect x="40" y="154" width="260" height="8" rx="4" fill="#64748B"/>
+    <rect x="40" y="185" width="80" height="24" rx="12" fill="#0284C7" fill-opacity="0.3" stroke="#38BDF8" stroke-width="1"/>
+    <rect x="130" y="185" width="80" height="24" rx="12" fill="#8B5CF6" fill-opacity="0.3" stroke="#A78BFA" stroke-width="1"/>
+    <rect x="220" y="185" width="80" height="24" rx="12" fill="#10B981" fill-opacity="0.3" stroke="#34D399" stroke-width="1"/>
+    <circle cx="410" cy="140" r="50" fill="#0284C7" opacity="0.15"/>
+    <circle cx="410" cy="140" r="30" stroke="#38BDF8" stroke-width="2" stroke-dasharray="6 6"/>
+  </g>
+  <defs>
+    <linearGradient id="tw-bg" x1="0" y1="0" x2="800" y2="450" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#082F49"/>
+      <stop offset="0.6" stop-color="#0C1527"/>
+      <stop offset="1" stop-color="#030712"/>
+    </linearGradient>
+  </defs>
+</svg>

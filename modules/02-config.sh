@@ -117,27 +117,66 @@ fi
 # Template selection
 log_step "Template Selection"
 
-echo "Select homepage template:"
-echo "1) Blank (minimal welcome page)"
-echo "2) Shop (e-commerce template)"
-while true; do
-    read -p "Enter choice [1-2]: " TEMPLATE_CHOICE
-    case $TEMPLATE_CHOICE in
-        1)
-            TEMPLATE_NAME="blank"
-            log_info "Blank template selected"
+# Prompt the user to pick one item from a list; the choice is stored in PICKED_ITEM
+pick_from_list() {
+    local prompt="$1"; shift
+    local items=("$@") i choice
+    echo "$prompt"
+    for i in "${!items[@]}"; do
+        echo "$((i+1))) ${items[$i]}"
+    done
+    while true; do
+        read -p "Enter choice [1-${#items[@]}]: " choice
+        if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#items[@]} )); then
+            PICKED_ITEM="${items[$((choice-1))]}"
+            return 0
+        fi
+        log_warn "Invalid choice. Enter a number between 1 and ${#items[@]}."
+    done
+}
+
+# Layout: templates/<category>/<variant>/page.tsx
+# Step 1 - categories = folders in templates/ holding at least one valid variant
+CATEGORY_LIST=()
+for cat_dir in "$SCRIPT_DIR"/templates/*/; do
+    cat_name="$(basename "$cat_dir")"
+    if [[ -f "${cat_dir}page.tsx" ]]; then
+        log_warn "Ignoring flat template '$cat_name' - move it into templates/$cat_name/default/"
+        continue
+    fi
+    for var_dir in "$cat_dir"*/; do
+        if [[ -f "${var_dir}page.tsx" ]]; then
+            CATEGORY_LIST+=("$cat_name")
             break
-            ;;
-        2)
-            TEMPLATE_NAME="shop"
-            log_info "Shop template selected"
-            break
-            ;;
-        *)
-            log_warn "Invalid choice. Please enter 1 or 2."
-            ;;
-    esac
+        fi
+    done
 done
+if [[ ${#CATEGORY_LIST[@]} -eq 0 ]]; then
+    log_error "No valid templates found in $SCRIPT_DIR/templates (expected templates/<category>/<variant>/page.tsx)"
+fi
+
+pick_from_list "Select template category:" "${CATEGORY_LIST[@]}"
+TEMPLATE_CATEGORY="$PICKED_ITEM"
+
+# Step 2 - variants inside the chosen category
+VARIANT_LIST=()
+for var_dir in "$SCRIPT_DIR/templates/$TEMPLATE_CATEGORY"/*/; do
+    if [[ -f "${var_dir}page.tsx" ]]; then
+        VARIANT_LIST+=("$(basename "$var_dir")")
+    fi
+done
+
+if [[ ${#VARIANT_LIST[@]} -eq 1 ]]; then
+    TEMPLATE_VARIANT="${VARIANT_LIST[0]}"
+    log_info "Only one variant available: $TEMPLATE_VARIANT"
+else
+    pick_from_list "Select '$TEMPLATE_CATEGORY' variant:" "${VARIANT_LIST[@]}"
+    TEMPLATE_VARIANT="$PICKED_ITEM"
+fi
+
+# TEMPLATE_NAME is "category/variant" and is used below to build TEMPLATE_PATH
+TEMPLATE_NAME="$TEMPLATE_CATEGORY/$TEMPLATE_VARIANT"
+log_info "Template selected: $TEMPLATE_NAME"
 
 # Resolve template directory relative to the script location
 TEMPLATE_PATH="$SCRIPT_DIR/templates/$TEMPLATE_NAME"
